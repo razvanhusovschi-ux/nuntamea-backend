@@ -1,0 +1,23 @@
+# render.yaml — alternative deploy on Render.com Free tier
+# WARNING: Free tier sleeps after 15 min inactivity (cold start ~30s)
+# Recommended: use Fly.io instead (no sleep)
+
+services:
+  - type: web
+    name: nuntamea-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: frankfurt
+    branch: main
+    rootDir: backend
+    healthCheckPath: /api/
+    envVars:
+      - key: DB_NAME
+        value: nuntamea_db
+      - key: PORT
+        value: 8001
+      - key: JWT_SECRET
+        generateValue: true
+      - key: MONGO_URL
+        sync: false  # Set manually in Render dashboard
