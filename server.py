@@ -562,6 +562,166 @@ async def public_rsvp(code: str, body: RsvpIn):
     return {"ok": True, "confirmat": body.confirmat}
 
 
+# ---------- Public HTML invitation page (served at /invite/{code}, no /api prefix) ----------
+@app.get("/invite/{code}", response_class=None)
+async def public_invitation_html(code: str):
+    from fastapi.responses import HTMLResponse
+    invitat = await db.invitati.find_one({"id": code}, {"_id": 0})
+    if not invitat:
+        return HTMLResponse(_render_not_found(), status_code=404)
+    user = await db.users.find_one({"uid": invitat["user_id"]}, {"_id": 0, "password_hash": 0})
+    if not user:
+        return HTMLResponse(_render_not_found(), status_code=404)
+    setup = user.get("invitation_setup") or {}
+    return HTMLResponse(_render_invitation(code, invitat, user, setup))
+
+
+def _render_not_found() -> str:
+    return """<!DOCTYPE html>
+<html lang="ro"><head><meta charset="UTF-8"><title>Invitație inexistentă</title>
+<style>body{font-family:-apple-system,sans-serif;text-align:center;padding:80px 20px;background:#FFF8F5;color:#2d2d2d}h1{color:#E8789A}</style>
+</head><body><h1>Invitație inexistentă 💔</h1><p>Link-ul pe care l-ai accesat nu mai este valid.</p></body></html>"""
+
+
+def _render_invitation(code: str, invitat: dict, user: dict, setup: dict) -> str:
+    guest_nume = invitat.get("nume", "")
+    already_confirmed = invitat.get("confirmat") == "confirmat"
+    already_declined = invitat.get("confirmat") == "refuzat"
+    mireasa = setup.get("mireasa") or (user.get("display_name") or "").split("&")[0].strip() or "Mireasa"
+    mire = setup.get("mire") or ""
+    if not mire and "&" in (user.get("display_name") or ""):
+        mire = (user.get("display_name") or "").split("&", 1)[1].strip()
+    mire = mire or "Mirele"
+    data_nunta = user.get("data_nunta") or ""
+    data_fmt = ""
+    if data_nunta:
+        try:
+            dt = datetime.fromisoformat(data_nunta.replace("Z", "+00:00"))
+            luni = ["ianuarie", "februarie", "martie", "aprilie", "mai", "iunie", "iulie", "august", "septembrie", "octombrie", "noiembrie", "decembrie"]
+            data_fmt = f"{dt.day} {luni[dt.month - 1]} {dt.year}"
+        except Exception:
+            data_fmt = data_nunta
+    photo = setup.get("couple_photo") or ""
+    locations = setup.get("locations") or []
+    godparents = setup.get("godparents") or {}
+    godp_txt = ""
+    if godparents.get("nume_nasa") or godparents.get("nume_nas"):
+        n1 = godparents.get("nume_nasa") or ""
+        n2 = godparents.get("nume_nas") or ""
+        godp_txt = f"<p class='godparents'>Nași: {n1}{' & ' if n1 and n2 else ''}{n2}</p>"
+
+    locations_html = ""
+    for loc in locations:
+        if loc.get("eveniment") or loc.get("locatie"):
+            ora = loc.get("ora", "")
+            ev = loc.get("eveniment", "")
+            locatie = loc.get("locatie", "")
+            adresa = loc.get("adresa", "")
+            locations_html += f"""
+            <div class="loc">
+              <div class="loc-time">{ora}</div>
+              <div class="loc-event">{ev}</div>
+              <div class="loc-place">{locatie}</div>
+              {f'<div class="loc-addr">{adresa}</div>' if adresa else ''}
+            </div>"""
+
+    photo_block = f'<img src="{photo}" alt="" class="couple-photo" />' if photo else '<div class="heart">💕</div>'
+
+    rsvp_block = ""
+    if already_confirmed:
+        rsvp_block = '<div class="rsvp-done confirmed">Ne bucurăm! Te așteptăm! 🎊</div>'
+    elif already_declined:
+        rsvp_block = '<div class="rsvp-done declined">Îți mulțumim că ne-ai anunțat! 💕</div>'
+    else:
+        rsvp_block = f'''
+        <p class="rsvp-q">Dragă <strong>{guest_nume}</strong>,<br/>ne onorezi cu prezența?</p>
+        <button class="btn-yes" onclick="rsvp('confirmat')">✓ Vin cu drag!</button>
+        <button class="btn-no" onclick="rsvp('refuzat')">✗ Nu pot veni</button>
+        <div id="submitting" style="display:none;margin-top:12px;color:#888">Se trimite...</div>
+        '''
+
+    return f"""<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Invitație nuntă — {mireasa} & {mire}</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: 'Playfair Display', Georgia, serif; background: linear-gradient(180deg, #FFF8F5 0%, #FDE6EC 100%); color: #2d2d2d; min-height: 100vh; padding: 24px 16px; }}
+  .card {{ max-width: 480px; margin: 0 auto; background: #fff; border-radius: 24px; box-shadow: 0 12px 40px rgba(232, 120, 154, 0.18); overflow: hidden; }}
+  .hero {{ position: relative; width: 100%; aspect-ratio: 3/4; background: #F5D5DC; display: flex; align-items: center; justify-content: center; overflow: hidden; }}
+  .couple-photo {{ width: 100%; height: 100%; object-fit: cover; }}
+  .heart {{ font-size: 120px; opacity: 0.35; }}
+  .hero::after {{ content: ''; position: absolute; inset: 0; background: linear-gradient(180deg, transparent 50%, rgba(0,0,0,0.6) 100%); }}
+  .hero-text {{ position: absolute; bottom: 30px; left: 0; right: 0; text-align: center; color: #fff; z-index: 2; padding: 0 20px; }}
+  .hero-names {{ font-size: 34px; font-weight: 400; line-height: 1.2; letter-spacing: 1px; text-shadow: 0 2px 12px rgba(0,0,0,0.3); }}
+  .hero-names .amp {{ color: #FFD4DE; font-style: italic; padding: 0 6px; }}
+  .hero-date {{ font-size: 13px; letter-spacing: 3px; margin-top: 10px; font-family: 'Inter', sans-serif; opacity: 0.95; }}
+  .body {{ padding: 32px 28px 40px; text-align: center; font-family: 'Inter', sans-serif; }}
+  .intro {{ font-size: 15px; color: #6b6b6b; line-height: 1.7; margin-bottom: 22px; }}
+  .godparents {{ font-size: 14px; color: #8e7a80; font-style: italic; margin-bottom: 20px; }}
+  .loc {{ border-top: 1px solid #f0e0e5; padding: 18px 0; }}
+  .loc:last-of-type {{ border-bottom: 1px solid #f0e0e5; margin-bottom: 24px; }}
+  .loc-time {{ font-family: 'Playfair Display', serif; font-size: 22px; color: #E8789A; font-style: italic; }}
+  .loc-event {{ font-size: 15px; font-weight: 600; color: #2d2d2d; margin-top: 4px; }}
+  .loc-place {{ font-size: 13px; color: #6b6b6b; margin-top: 2px; }}
+  .loc-addr {{ font-size: 12px; color: #8e8e8e; margin-top: 2px; }}
+  .rsvp-q {{ font-family: 'Playfair Display', serif; font-size: 20px; color: #2d2d2d; margin-top: 24px; margin-bottom: 18px; line-height: 1.5; }}
+  .btn-yes, .btn-no {{ display: block; width: 100%; padding: 16px; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; margin-bottom: 10px; font-family: 'Inter', sans-serif; -webkit-tap-highlight-color: transparent; transition: transform 0.1s; }}
+  .btn-yes {{ background: #E8789A; color: #fff; }}
+  .btn-yes:active {{ transform: scale(0.97); }}
+  .btn-no {{ background: #fff; color: #8e8e8e; border: 1.5px solid #e5d8de; }}
+  .btn-no:active {{ transform: scale(0.97); }}
+  .rsvp-done {{ padding: 22px; border-radius: 12px; font-family: 'Playfair Display', serif; font-size: 19px; }}
+  .rsvp-done.confirmed {{ background: #FDE6EC; color: #2d2d2d; }}
+  .rsvp-done.declined {{ background: #F5E5E5; color: #2d2d2d; }}
+  .footer {{ text-align: center; margin-top: 24px; font-size: 11px; color: #b8a5ac; font-family: 'Inter', sans-serif; letter-spacing: 2px; }}
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="card">
+    <div class="hero">
+      {photo_block}
+      <div class="hero-text">
+        <div class="hero-names">{mireasa} <span class="amp">&</span> {mire}</div>
+        {f'<div class="hero-date">{data_fmt.upper()}</div>' if data_fmt else ''}
+      </div>
+    </div>
+    <div class="body">
+      <p class="intro">Ne-ar face mare bucurie să ne fii alături<br/>în cea mai importantă zi a vieții noastre.</p>
+      {godp_txt}
+      {locations_html}
+      {rsvp_block}
+    </div>
+  </div>
+  <div class="footer">NUNTA MEA</div>
+<script>
+async function rsvp(status) {{
+  const btns = document.querySelectorAll('.btn-yes, .btn-no');
+  btns.forEach(b => b.disabled = true);
+  document.getElementById('submitting').style.display = 'block';
+  try {{
+    const r = await fetch('/api/invitation/{code}/rsvp', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ confirmat: status }})
+    }});
+    if (!r.ok) throw new Error('Eroare');
+    location.reload();
+  }} catch (e) {{
+    alert('A apărut o eroare. Te rugăm să încerci din nou.');
+    btns.forEach(b => b.disabled = false);
+    document.getElementById('submitting').style.display = 'none';
+  }}
+}}
+</script>
+</body></html>"""
+
+
 # ---------- Seed ----------
 DEFAULT_TASKS = [
     # Planificare inițială
