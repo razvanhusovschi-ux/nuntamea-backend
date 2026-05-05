@@ -10,10 +10,17 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 import bcrypt
 import jwt
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
+import secrets
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, BackgroundTasks
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
+
+from notifications import (
+    send_email, send_push,
+    build_password_reset_email, build_rsvp_notification_email,
+    APP_PUBLIC_URL,
+)
 
 
 # ---------- Setup ----------
@@ -153,6 +160,20 @@ class TimelineIn(BaseModel):
     ora: str  # HH:MM
 
 
+class ForgotPasswordIn(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordIn(BaseModel):
+    token: str
+    new_password: str = Field(min_length=6)
+
+
+class PushTokenIn(BaseModel):
+    token: str
+    platform: Optional[str] = "android"
+
+
 # ---------- Auth ----------
 @api.post("/auth/register")
 async def register(body: RegisterIn):
@@ -194,6 +215,74 @@ async def me(user=Depends(get_current_user)):
 
 @api.post("/auth/logout")
 async def logout(user=Depends(get_current_user)):
+    return {"ok": True}
+
+
+# ---------- Forgot Password ----------
+@api.post("/auth/forgot-password")
+async def forgot_password(body: ForgotPasswordIn, background: BackgroundTasks):
+    """Send password reset email. Always returns OK to avoid email enumeration."""
+    email = body.email.lower().strip()
+    user = await db.users.find_one({"email": email})
+    if user:
+        token = secrets.token_urlsafe(32)
+        expires = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        await db.password_reset_tokens.update_one(
+            {"uid": user["uid"]},
+            {"$set": {"uid": user["uid"], "token": token, "email": email, "expires_at": expires, "used": False}},
+            upsert=True,
+        )
+        reset_link = f"{APP_PUBLIC_URL}/reset-password?token={token}"
+        subject, html = build_password_reset_email(user.get("display_name", ""), reset_link)
+        background.add_task(send_email, email, subject, html)
+        logger.info("Password reset email queued for %s", email)
+    # Always return OK
+    return {"ok": True, "message": "Dacă există un cont cu acest email, vei primi un link de resetare."}
+
+
+@api.post("/auth/reset-password")
+async def reset_password(body: ResetPasswordIn):
+    """Reset password using token from email link."""
+    rec = await db.password_reset_tokens.find_one({"token": body.token, "used": False})
+    if not rec:
+        raise HTTPException(status_code=400, detail="Link invalid sau deja folosit")
+    try:
+        expires = datetime.fromisoformat(rec["expires_at"])
+        if expires < datetime.now(timezone.utc):
+            raise HTTPException(status_code=400, detail="Link expirat. Cere unul nou.")
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Link invalid")
+    await db.users.update_one(
+        {"uid": rec["uid"]},
+        {"$set": {"password_hash": hash_password(body.new_password)}},
+    )
+    await db.password_reset_tokens.update_one({"token": body.token}, {"$set": {"used": True}})
+    return {"ok": True, "message": "Parola a fost resetată cu succes"}
+
+
+# ---------- Push Tokens ----------
+@api.post("/auth/push-token")
+async def register_push_token(body: PushTokenIn, user=Depends(get_current_user)):
+    """Register Expo push token for the authenticated user."""
+    if not body.token or not body.token.startswith("ExponentPushToken["):
+        return {"ok": False, "reason": "invalid_token_format"}
+    await db.push_tokens.update_one(
+        {"token": body.token},
+        {"$set": {
+            "uid": user["uid"],
+            "token": body.token,
+            "platform": body.platform or "android",
+            "updated_at": now_iso(),
+        }},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+@api.delete("/auth/push-token")
+async def unregister_push_token(body: PushTokenIn, user=Depends(get_current_user)):
+    """Remove a push token (e.g. on logout)."""
+    await db.push_tokens.delete_one({"token": body.token, "uid": user["uid"]})
     return {"ok": True}
 
 
@@ -498,6 +587,17 @@ async def del_timeline(item_id: str, user=Depends(get_current_user)):
     return {"deleted": res.deleted_count}
 
 
+@api.put("/timeline/{item_id}")
+async def edit_timeline(item_id: str, body: TimelineIn, user=Depends(get_current_user)):
+    res = await db.timeline.update_one(
+        {"id": item_id, "user_id": user["uid"]},
+        {"$set": {"titlu": body.titlu, "ora": body.ora}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Moment inexistent")
+    return {"ok": True}
+
+
 # ---------- Health ----------
 @api.get("/")
 async def root():
@@ -550,16 +650,117 @@ async def public_invitation(code: str):
 
 
 @api.post("/invitation/{code}/rsvp")
-async def public_rsvp(code: str, body: RsvpIn):
+async def public_rsvp(code: str, body: RsvpIn, background: BackgroundTasks):
     if body.confirmat not in ("confirmat", "refuzat"):
         raise HTTPException(status_code=400, detail="Status invalid")
-    res = await db.invitati.update_one(
+    invitat = await db.invitati.find_one({"id": code}, {"_id": 0})
+    if not invitat:
+        raise HTTPException(status_code=404, detail="Invitație inexistentă")
+    await db.invitati.update_one(
         {"id": code},
         {"$set": {"confirmat": body.confirmat, "responded_at": now_iso()}},
     )
-    if res.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Invitație inexistentă")
+    # Notify the couple (email + push) — non-blocking, never fails the request
+    user = await db.users.find_one({"uid": invitat["user_id"]}, {"_id": 0, "password_hash": 0})
+    if user:
+        guest_name = invitat.get("nume", "Un invitat")
+        couple_display = user.get("display_name", "")
+        # Email
+        if user.get("email"):
+            subject, html = build_rsvp_notification_email(couple_display, guest_name, body.confirmat)
+            background.add_task(send_email, user["email"], subject, html)
+        # Push
+        tokens_cursor = db.push_tokens.find({"uid": user["uid"]}, {"_id": 0, "token": 1})
+        tokens = [t["token"] async for t in tokens_cursor]
+        if tokens:
+            label = "a confirmat ✓" if body.confirmat == "confirmat" else "a refuzat ✗"
+            background.add_task(
+                send_push,
+                tokens,
+                f"{guest_name} {label}",
+                "Vezi toate răspunsurile în aplicație",
+                {"type": "rsvp", "code": code, "status": body.confirmat},
+            )
     return {"ok": True, "confirmat": body.confirmat}
+
+
+# ---------- Public HTML invitation page (served at /invite/{code}, no /api prefix) ----------
+@app.get("/reset-password", response_class=None)
+async def reset_password_page(token: str = ""):
+    """Public HTML page for password reset (linked from email)."""
+    from fastapi.responses import HTMLResponse
+    if not token:
+        return HTMLResponse(_render_reset_invalid("Link invalid sau lipsește token-ul."), status_code=400)
+    rec = await db.password_reset_tokens.find_one({"token": token, "used": False})
+    if not rec:
+        return HTMLResponse(_render_reset_invalid("Link invalid sau deja folosit."), status_code=400)
+    try:
+        if datetime.fromisoformat(rec["expires_at"]) < datetime.now(timezone.utc):
+            return HTMLResponse(_render_reset_invalid("Link expirat. Cere unul nou din aplicație."), status_code=400)
+    except Exception:
+        return HTMLResponse(_render_reset_invalid("Link invalid."), status_code=400)
+    return HTMLResponse(_render_reset_form(token, rec.get("email", "")))
+
+
+def _render_reset_invalid(msg: str) -> str:
+    return f"""<!DOCTYPE html><html lang="ro"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Resetare parolă</title>
+<style>body{{font-family:-apple-system,sans-serif;text-align:center;padding:60px 20px;background:#FFF8F5;color:#2A1F2D}}h1{{color:#E8789A;font-family:Georgia,serif}}.box{{max-width:440px;margin:0 auto;background:#fff;border-radius:18px;padding:32px}}.btn{{display:inline-block;margin-top:20px;background:#E8789A;color:#fff;padding:12px 28px;border-radius:10px;text-decoration:none;font-weight:600}}</style>
+</head><body><div class="box"><h1>💔 Oops</h1><p>{msg}</p></div></body></html>"""
+
+
+def _render_reset_form(token: str, email: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="ro"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Resetare parolă — Nunta Mea</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:'Inter',-apple-system,sans-serif;background:linear-gradient(180deg,#FFF8F5 0%,#FDE6EC 100%);min-height:100vh;padding:32px 16px;color:#2A1F2D}}
+.card{{max-width:440px;margin:0 auto;background:#fff;border-radius:24px;padding:36px 28px;box-shadow:0 12px 40px rgba(232,120,154,0.15)}}
+h1{{font-family:'Playfair Display',Georgia,serif;font-size:28px;color:#E8789A;text-align:center;margin-bottom:8px}}
+.sub{{text-align:center;color:#8B7A86;font-size:14px;margin-bottom:24px}}
+.email{{background:#FFF8F5;border-radius:8px;padding:10px 14px;font-size:13px;color:#8B7A86;text-align:center;margin-bottom:20px}}
+label{{display:block;font-size:13px;color:#8B7A86;font-weight:500;margin-bottom:6px;margin-top:14px}}
+input{{width:100%;padding:14px;border:1px solid #F1E4E0;border-radius:10px;font-size:15px;color:#2A1F2D;font-family:inherit;background:#fff}}
+input:focus{{outline:none;border-color:#E8789A}}
+.btn{{width:100%;background:#E8789A;color:#fff;border:none;padding:16px;border-radius:10px;font-size:16px;font-weight:600;cursor:pointer;margin-top:22px;-webkit-tap-highlight-color:transparent}}
+.btn:disabled{{opacity:0.6}}
+.error{{background:#FFE8E8;color:#E27676;padding:12px;border-radius:8px;font-size:13px;margin-top:12px;text-align:center;display:none}}
+.success{{background:#E8F8EE;color:#5BA678;padding:14px;border-radius:8px;font-size:14px;margin-top:12px;text-align:center;display:none}}
+.heart{{text-align:center;font-size:42px;margin-bottom:8px}}
+</style></head><body>
+<div class="card">
+  <div class="heart">💍</div>
+  <h1>Setează parolă nouă</h1>
+  <p class="sub">pentru contul tău Nunta Mea</p>
+  <div class="email">{email}</div>
+  <form id="f">
+    <label>Parolă nouă (minim 6 caractere)</label>
+    <input type="password" id="p1" minlength="6" required autocomplete="new-password" />
+    <label>Confirmă parola</label>
+    <input type="password" id="p2" minlength="6" required autocomplete="new-password" />
+    <div class="error" id="err"></div>
+    <div class="success" id="ok"></div>
+    <button type="submit" class="btn" id="btn">Salvează parola nouă</button>
+  </form>
+</div>
+<script>
+const f=document.getElementById('f'),p1=document.getElementById('p1'),p2=document.getElementById('p2'),err=document.getElementById('err'),ok=document.getElementById('ok'),btn=document.getElementById('btn');
+f.addEventListener('submit',async e=>{{
+  e.preventDefault();err.style.display='none';ok.style.display='none';
+  if(p1.value!==p2.value){{err.textContent='Parolele nu se potrivesc';err.style.display='block';return}}
+  if(p1.value.length<6){{err.textContent='Parola trebuie să aibă cel puțin 6 caractere';err.style.display='block';return}}
+  btn.disabled=true;btn.textContent='Se salvează...';
+  try{{
+    const r=await fetch('/api/auth/reset-password',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:'{token}',new_password:p1.value}})}});
+    const data=await r.json();
+    if(!r.ok)throw new Error(data.detail||'Eroare');
+    ok.textContent='✓ Parolă resetată! Acum poți intra în aplicație cu noua parolă.';ok.style.display='block';
+    f.querySelectorAll('input,button').forEach(x=>x.disabled=true);
+  }}catch(ex){{err.textContent=ex.message||'Eroare necunoscută';err.style.display='block';btn.disabled=false;btn.textContent='Salvează parola nouă';}}
+}});
+</script>
+</body></html>"""
 
 
 # ---------- Public HTML invitation page (served at /invite/{code}, no /api prefix) ----------
@@ -574,6 +775,25 @@ async def public_invitation_html(code: str):
         return HTMLResponse(_render_not_found(), status_code=404)
     setup = user.get("invitation_setup") or {}
     return HTMLResponse(_render_invitation(code, invitat, user, setup))
+
+
+# ---------- Asset download helpers (Play Store icon, etc.) ----------
+@api.get("/assets/play-store-icon")
+async def download_play_store_icon():
+    from fastapi.responses import FileResponse
+    import os as _os
+    candidates = [
+        "/app/play-store-icon-512.png",
+        "/app/frontend/assets/images/play-store-icon-512.png",
+    ]
+    for p in candidates:
+        if _os.path.exists(p):
+            return FileResponse(
+                p,
+                media_type="image/png",
+                filename="nuntamea-play-store-icon-512.png",
+            )
+    raise HTTPException(status_code=404, detail="Asset not found")
 
 
 def _render_not_found() -> str:
