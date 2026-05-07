@@ -98,6 +98,7 @@ class UpdateProfileIn(BaseModel):
     display_name: Optional[str] = None
     buget_total: Optional[int] = None
     data_nunta: Optional[str] = None  # ISO date
+    language: Optional[str] = None  # ro / en / it / es
 
 
 class TaskCheckIn(BaseModel):
@@ -794,6 +795,33 @@ async def download_play_store_icon():
                 filename="nuntamea-play-store-icon-512.png",
             )
     raise HTTPException(status_code=404, detail="Asset not found")
+
+
+@api.get("/assets/locale-ro")
+async def download_ro_locale():
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/frontend/src/i18n/ro.json"
+    if _os.path.exists(p):
+        return FileResponse(p, media_type="application/json", filename="ro.json")
+    raise HTTPException(status_code=404, detail="Locale file not found")
+
+
+@api.get("/assets/server-source")
+async def download_server_source():
+    """Download current backend source files (server.py + notifications.py + requirements.txt) as a tar.gz."""
+    from fastapi.responses import FileResponse
+    import os as _os, tarfile, tempfile
+    files = ["/app/backend/server.py", "/app/backend/notifications.py", "/app/backend/requirements.txt"]
+    files = [f for f in files if _os.path.exists(f)]
+    if not files:
+        raise HTTPException(status_code=404, detail="Source files missing")
+    out = tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False)
+    out.close()
+    with tarfile.open(out.name, "w:gz") as tar:
+        for f in files:
+            tar.add(f, arcname=_os.path.basename(f))
+    return FileResponse(out.name, media_type="application/gzip", filename="nuntamea-backend-v1.0.9.tar.gz")
 
 
 def _render_not_found() -> str:
