@@ -1004,47 +1004,70 @@ async def billing_restore(user=Depends(get_current_user)):
 
 @api.get("/assets/server-source")
 async def download_server_source():
-    """Download latest backend source archive (v1.1.0)."""
+    """Download latest backend source archive (v1.2.1)."""
     from fastapi.responses import FileResponse
     import os as _os, tarfile, tempfile
-    # Prefer pre-built tarball
-    pre = "/app/backend_v1.1.0.tar.gz"
-    if _os.path.exists(pre):
-        return FileResponse(pre, media_type="application/gzip", filename="nuntamea-backend-v1.1.0.tar.gz")
-    # Fallback: build minimal tar on the fly
-    files = ["/app/backend/server.py", "/app/backend/notifications.py", "/app/backend/requirements.txt"]
-    files = [f for f in files if _os.path.exists(f)]
-    if not files:
+    # Build a fresh tar.gz from /app/backend on each request to always ship latest server.py
+    src_files = ["/app/backend/server.py", "/app/backend/notifications.py", "/app/backend/requirements.txt", "/app/backend/render.yaml", "/app/backend/Dockerfile"]
+    src_files = [f for f in src_files if _os.path.exists(f)]
+    if not src_files:
         raise HTTPException(status_code=404, detail="Source files missing")
     out = tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False)
     out.close()
     with tarfile.open(out.name, "w:gz") as tar:
-        for f in files:
-            tar.add(f, arcname=_os.path.basename(f))
-    return FileResponse(out.name, media_type="application/gzip", filename="nuntamea-backend-v1.1.0.tar.gz")
+        for f in src_files:
+            tar.add(f, arcname=f"backend/{_os.path.basename(f)}")
+    return FileResponse(out.name, media_type="application/gzip", filename="nuntamea-backend-v1.2.1.tar.gz")
+
+
+@api.get("/assets/server-py")
+async def download_server_py_only():
+    """Download just the latest server.py (v1.2.1) — for quick replacement on Render."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/backend/server.py"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="server.py missing")
+    return FileResponse(p, media_type="text/x-python; charset=utf-8", filename="server.py")
 
 
 @api.get("/assets/frontend-source")
 async def download_frontend_source():
-    """Download full frontend source (without node_modules) as a tar.gz — v1.1.0."""
+    """Download full frontend source (without node_modules) as a tar.gz — v1.2.1."""
     from fastapi.responses import FileResponse
-    import os as _os
-    candidates = ["/app/frontend_v1.1.0.tar.gz", "/app/nuntamea-frontend-v1.1.0.tar.gz"]
-    for p in candidates:
-        if _os.path.exists(p):
-            return FileResponse(p, media_type="application/gzip", filename="nuntamea-frontend-v1.1.0.tar.gz")
-    raise HTTPException(status_code=404, detail="Frontend archive not built")
+    import os as _os, tarfile, tempfile
+    # Prefer pre-built v1.2.1 tarball
+    pre = "/app/frontend_v1.2.1.tar.gz"
+    if _os.path.exists(pre):
+        return FileResponse(pre, media_type="application/gzip", filename="nuntamea-frontend-v1.2.1.tar.gz")
+    # Fallback: build on the fly from /app/frontend
+    fr_dir = "/app/frontend"
+    if not _os.path.isdir(fr_dir):
+        raise HTTPException(status_code=404, detail="Frontend folder missing")
+    out = tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False)
+    out.close()
+    SKIP = {"node_modules", ".expo", "dist", ".git", ".metro-cache", ".cache", "web-build"}
+    def _filter(tarinfo):
+        for s in SKIP:
+            if f"/{s}/" in ("/" + tarinfo.name + "/") or tarinfo.name.endswith(f"/{s}"):
+                return None
+        return tarinfo
+    with tarfile.open(out.name, "w:gz") as tar:
+        tar.add(fr_dir, arcname="frontend", filter=_filter)
+    return FileResponse(out.name, media_type="application/gzip", filename="nuntamea-frontend-v1.2.1.tar.gz")
 
 
 @api.get("/assets/deploy-final")
 async def download_deploy_doc():
-    """Download the v1.1.0 final deploy markdown (release notes + build instructions)."""
+    """Download the final deploy markdown (release notes + build instructions)."""
     from fastapi.responses import FileResponse
     import os as _os
-    p = "/app/DEPLOY_FINAL_v1.1.0.md"
-    if not _os.path.exists(p):
-        raise HTTPException(status_code=404, detail="Deploy doc missing")
-    return FileResponse(p, media_type="text/markdown; charset=utf-8", filename="DEPLOY_FINAL_v1.1.0.md")
+    # Prefer latest version
+    for p in ["/app/DEPLOY_FINAL_v1.2.0.md", "/app/DEPLOY_FINAL_v1.1.0.md"]:
+        if _os.path.exists(p):
+            ver = "v1.2.0" if "v1.2.0" in p else "v1.1.0"
+            return FileResponse(p, media_type="text/markdown; charset=utf-8", filename=f"DEPLOY_FINAL_{ver}.md")
+    raise HTTPException(status_code=404, detail="Deploy doc missing")
 
 
 @api.get("/assets/locale-ro")
@@ -1087,127 +1110,594 @@ def _render_not_found() -> str:
 </head><body><h1>Invitație inexistentă 💔</h1><p>Link-ul pe care l-ai accesat nu mai este valid.</p></body></html>"""
 
 
+# ---------- Public Invitation Renderer (8 themes, multilingual) ----------
+import urllib.parse as _urlparse
+
+# Language-specific UI strings used inside the public invitation HTML
+INV_I18N = {
+    "ro": {
+        "title": "Invitație nuntă",
+        "intro": "Ne-ar face mare bucurie să ne fii alături<br/>în cea mai importantă zi a vieții noastre.",
+        "intro_short": "Cu multă bucurie te invităm",
+        "godparents": "Nași",
+        "parents_groom": "Părinții mirelui",
+        "parents_bride": "Părinții miresei",
+        "view_map": "Vezi pe hartă",
+        "rsvp_q": "Dragă <strong>{name}</strong>,<br/>ne onorezi cu prezența?",
+        "yes": "✓ Vin cu drag!",
+        "no": "✗ Nu pot veni",
+        "submitting": "Se trimite...",
+        "thanks_yes": "Ne bucurăm! Te așteptăm! 🎊",
+        "thanks_no": "Îți mulțumim că ne-ai anunțat! 💕",
+        "err": "A apărut o eroare. Te rugăm să încerci din nou.",
+        "footer": "NUNTA MEA",
+        "save_date": "SAVE THE DATE",
+        "ceremony": "CEREMONIA",
+        "months": ["ianuarie","februarie","martie","aprilie","mai","iunie","iulie","august","septembrie","octombrie","noiembrie","decembrie"],
+        "weekdays": ["luni","marți","miercuri","joi","vineri","sâmbătă","duminică"],
+    },
+    "en": {
+        "title": "Wedding Invitation",
+        "intro": "It would be our greatest joy to have you<br/>by our side on the most important day of our lives.",
+        "intro_short": "We joyfully invite you",
+        "godparents": "Godparents",
+        "parents_groom": "Groom's parents",
+        "parents_bride": "Bride's parents",
+        "view_map": "Open in maps",
+        "rsvp_q": "Dear <strong>{name}</strong>,<br/>will you join us?",
+        "yes": "✓ I'll be there!",
+        "no": "✗ I can't make it",
+        "submitting": "Sending...",
+        "thanks_yes": "We're so happy! See you soon! 🎊",
+        "thanks_no": "Thank you for letting us know 💕",
+        "err": "Something went wrong. Please try again.",
+        "footer": "MY WEDDING",
+        "save_date": "SAVE THE DATE",
+        "ceremony": "CEREMONY",
+        "months": ["January","February","March","April","May","June","July","August","September","October","November","December"],
+        "weekdays": ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"],
+    },
+    "it": {
+        "title": "Invito di nozze",
+        "intro": "Sarebbe una grande gioia averti accanto<br/>nel giorno più importante della nostra vita.",
+        "intro_short": "Ti invitiamo con gioia",
+        "godparents": "Testimoni",
+        "parents_groom": "Genitori dello sposo",
+        "parents_bride": "Genitori della sposa",
+        "view_map": "Vedi sulla mappa",
+        "rsvp_q": "Caro/a <strong>{name}</strong>,<br/>parteciperai?",
+        "yes": "✓ Ci sarò!",
+        "no": "✗ Non posso venire",
+        "submitting": "Invio in corso...",
+        "thanks_yes": "Siamo felicissimi! Ti aspettiamo! 🎊",
+        "thanks_no": "Grazie per averci avvisato 💕",
+        "err": "Si è verificato un errore. Riprova.",
+        "footer": "IL MIO MATRIMONIO",
+        "save_date": "SAVE THE DATE",
+        "ceremony": "CERIMONIA",
+        "months": ["gennaio","febbraio","marzo","aprile","maggio","giugno","luglio","agosto","settembre","ottobre","novembre","dicembre"],
+        "weekdays": ["lunedì","martedì","mercoledì","giovedì","venerdì","sabato","domenica"],
+    },
+    "es": {
+        "title": "Invitación de boda",
+        "intro": "Sería nuestra mayor alegría tenerte<br/>a nuestro lado en el día más importante de nuestras vidas.",
+        "intro_short": "Te invitamos con alegría",
+        "godparents": "Padrinos",
+        "parents_groom": "Padres del novio",
+        "parents_bride": "Padres de la novia",
+        "view_map": "Ver en el mapa",
+        "rsvp_q": "Querido/a <strong>{name}</strong>,<br/>¿nos acompañarás?",
+        "yes": "✓ ¡Allí estaré!",
+        "no": "✗ No puedo asistir",
+        "submitting": "Enviando...",
+        "thanks_yes": "¡Qué alegría! ¡Te esperamos! 🎊",
+        "thanks_no": "Gracias por avisarnos 💕",
+        "err": "Algo salió mal. Por favor, inténtalo de nuevo.",
+        "footer": "MI BODA",
+        "save_date": "SAVE THE DATE",
+        "ceremony": "CEREMONIA",
+        "months": ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"],
+        "weekdays": ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"],
+    },
+}
+
+# Theme palettes — must match frontend src/invitationThemes.ts
+THEME_DATA = {
+    "ivory_elegant":    {"bg":"#FDF8F2","card":"#FFFFFF","accent":"#C9A96E","accentSoft":"#F4EBD8","text":"#3A2E1F","muted":"#8A7A66","divider":"#E8DDC7","layout":"classic","grad_top":"#FDF8F2","grad_bot":"#F4EBD8"},
+    "blush_romance":    {"bg":"#FFF0F3","card":"#FFFFFF","accent":"#C28B98","accentSoft":"#FAD7DF","text":"#3D1F2A","muted":"#8A6975","divider":"#F1D0D9","layout":"classic","grad_top":"#FFF0F3","grad_bot":"#FAD7DF"},
+    "sage_garden":      {"bg":"#F8FBF5","card":"#FFFFFF","accent":"#87A878","accentSoft":"#DCE7D2","text":"#293125","muted":"#6B7866","divider":"#D2DEC6","layout":"classic","grad_top":"#F8FBF5","grad_bot":"#DCE7D2"},
+    "gold_glamour":     {"bg":"#FBF6EC","card":"#FFFDF7","accent":"#B8862F","accentSoft":"#F2E5C5","text":"#2A1F0F","muted":"#7A6840","divider":"#E5D5A8","layout":"ornate","grad_top":"#FBF6EC","grad_bot":"#F2E5C5"},
+    "burgundy_passion": {"bg":"#3D1620","card":"#4F1A28","accent":"#E8C8A8","accentSoft":"#5C2230","text":"#FAEDE0","muted":"#D8B5A0","divider":"#7C3A4A","layout":"luxe","grad_top":"#3D1620","grad_bot":"#5C2230"},
+    "marble_modern":    {"bg":"#F2F1ED","card":"#FFFFFF","accent":"#1F1D1A","accentSoft":"#E5E2DA","text":"#1F1D1A","muted":"#7C7268","divider":"#1F1D1A","layout":"magazine","grad_top":"#F2F1ED","grad_bot":"#E5E2DA"},
+    "forest_woodland":  {"bg":"#1F2D1E","card":"#26392A","accent":"#D4B872","accentSoft":"#3B5238","text":"#F2EAD3","muted":"#B5C2A7","divider":"#5A7456","layout":"botanical","grad_top":"#1F2D1E","grad_bot":"#26392A"},
+    "dusty_rose":       {"bg":"#FAF1ED","card":"#FFFAF7","accent":"#A0656D","accentSoft":"#EBD0D3","text":"#34201F","muted":"#7B585A","divider":"#DFC1C4","layout":"vintage","grad_top":"#FAF1ED","grad_bot":"#EBD0D3"},
+}
+
+# Backward-compat for legacy theme keys
+_THEME_LEGACY = {"burgundy_velvet":"burgundy_passion","marble_white":"marble_modern","forest_green":"forest_woodland"}
+
+
+def _format_invitation_date(iso: str, lang: str) -> tuple[str, str, str]:
+    """Returns (long, short, weekday) localized date strings."""
+    if not iso:
+        return "", "", ""
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        L = INV_I18N.get(lang, INV_I18N["ro"])
+        long_d = f"{dt.day} {L['months'][dt.month - 1]} {dt.year}"
+        short_d = f"{dt.day:02d}.{dt.month:02d}.{dt.year}"
+        # Python weekday(): Mon=0..Sun=6. We have monday-first list.
+        wd = L["weekdays"][dt.weekday()] if 0 <= dt.weekday() < 7 else ""
+        return long_d, short_d, wd
+    except Exception:
+        return iso, iso, ""
+
+
+def _maps_url(addr: str, harta_url: str = "") -> str:
+    if harta_url:
+        return harta_url
+    if not addr:
+        return ""
+    return f"https://www.google.com/maps/search/?api=1&query={_urlparse.quote(addr)}"
+
+
+def _build_locations_block(locations: list, palette: dict, L: dict) -> str:
+    """Builds the locations list HTML — shared across themes (CSS varies)."""
+    if not locations:
+        return ""
+    out = []
+    for loc in locations:
+        if not (loc.get("eveniment") or loc.get("locatie")):
+            continue
+        ora = loc.get("ora", "") or ""
+        ev = loc.get("eveniment", "") or ""
+        locatie = loc.get("locatie", "") or ""
+        adresa = loc.get("adresa", "") or ""
+        harta = loc.get("harta_url", "") or ""
+        map_link = _maps_url(adresa, harta)
+        map_btn = f'<a class="loc-map" href="{map_link}" target="_blank" rel="noopener">📍 {L["view_map"]}</a>' if map_link else ""
+        out.append(f"""
+            <div class="loc">
+              <div class="loc-time">{ora}</div>
+              <div class="loc-event">{ev}</div>
+              {f'<div class="loc-place">{locatie}</div>' if locatie else ''}
+              {f'<div class="loc-addr">{adresa}</div>' if adresa else ''}
+              {map_btn}
+            </div>""")
+    return "\n".join(out)
+
+
+def _build_family_block(setup: dict, L: dict) -> str:
+    """Nași + parents block — shared HTML, theme-styled via CSS."""
+    parts = []
+    nas = (setup.get("nas") or "").strip()
+    nasa = (setup.get("nasa") or "").strip()
+    if nas or nasa:
+        nasi = " & ".join([x for x in [nasa, nas] if x])
+        parts.append(f"<div class='fam-row'><span class='fam-label'>{L['godparents']}</span><span class='fam-val'>{nasi}</span></div>")
+    tm = (setup.get("tata_mire") or "").strip()
+    mm = (setup.get("mama_mire") or "").strip()
+    if tm or mm:
+        pg = " & ".join([x for x in [tm, mm] if x])
+        parts.append(f"<div class='fam-row'><span class='fam-label'>{L['parents_groom']}</span><span class='fam-val'>{pg}</span></div>")
+    tmi = (setup.get("tata_mireasa") or "").strip()
+    mmi = (setup.get("mama_mireasa") or "").strip()
+    if tmi or mmi:
+        pb = " & ".join([x for x in [tmi, mmi] if x])
+        parts.append(f"<div class='fam-row'><span class='fam-label'>{L['parents_bride']}</span><span class='fam-val'>{pb}</span></div>")
+    if not parts:
+        return ""
+    return f"<div class='family'>{''.join(parts)}</div>"
+
+
+def _photo_block(photo: str, layout: str) -> str:
+    if photo:
+        return f'<img src="{photo}" alt="" class="couple-photo" />'
+    # Fallback ornament per layout
+    icons = {"ornate": "❦", "luxe": "✦", "magazine": "—", "botanical": "✿", "vintage": "♥"}
+    return f'<div class="heart">{icons.get(layout, "💕")}</div>'
+
+
+def _rsvp_block(code: str, guest_nume: str, status: str, L: dict) -> str:
+    if status == "confirmat":
+        return f'<div class="rsvp-done confirmed">{L["thanks_yes"]}</div>'
+    if status == "refuzat":
+        return f'<div class="rsvp-done declined">{L["thanks_no"]}</div>'
+    q = L["rsvp_q"].format(name=guest_nume)
+    return f'''
+        <p class="rsvp-q">{q}</p>
+        <button class="btn-yes" onclick="rsvp('confirmat')">{L["yes"]}</button>
+        <button class="btn-no" onclick="rsvp('refuzat')">{L["no"]}</button>
+        <div id="submitting" style="display:none;margin-top:12px;color:#888">{L["submitting"]}</div>
+        '''
+
+
+def _theme_css(palette: dict, layout: str) -> str:
+    """Returns layout-specific CSS using palette colors."""
+    P = palette
+    base = f"""
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: 'Playfair Display', Georgia, serif; background: linear-gradient(180deg, {P['grad_top']} 0%, {P['grad_bot']} 100%); color: {P['text']}; min-height: 100vh; padding: 24px 16px; -webkit-font-smoothing: antialiased; }}
+  a {{ color: inherit; text-decoration: none; }}
+  .card {{ max-width: 480px; margin: 0 auto; background: {P['card']}; border-radius: 24px; box-shadow: 0 12px 40px rgba(0,0,0,0.10); overflow: hidden; }}
+  .hero {{ position: relative; width: 100%; aspect-ratio: 3/4; background: {P['accentSoft']}; display: flex; align-items: center; justify-content: center; overflow: hidden; }}
+  .couple-photo {{ width: 100%; height: 100%; object-fit: cover; }}
+  .heart {{ font-size: 120px; opacity: 0.55; color: {P['accent']}; }}
+  .body {{ padding: 32px 28px 40px; text-align: center; font-family: 'Inter', sans-serif; }}
+  .intro {{ font-size: 15px; color: {P['muted']}; line-height: 1.7; margin-bottom: 22px; }}
+  .family {{ margin: 0 0 18px; padding: 16px; border-radius: 12px; background: {P['accentSoft']}33; }}
+  .fam-row {{ display: flex; flex-direction: column; gap: 2px; padding: 6px 0; }}
+  .fam-label {{ font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: {P['muted']}; }}
+  .fam-val {{ font-family: 'Playfair Display', serif; font-size: 15px; color: {P['text']}; }}
+  .loc {{ border-top: 1px solid {P['divider']}55; padding: 18px 0; }}
+  .loc:last-of-type {{ border-bottom: 1px solid {P['divider']}55; margin-bottom: 24px; }}
+  .loc-time {{ font-family: 'Playfair Display', serif; font-size: 22px; color: {P['accent']}; font-style: italic; }}
+  .loc-event {{ font-size: 15px; font-weight: 600; color: {P['text']}; margin-top: 4px; }}
+  .loc-place {{ font-size: 13px; color: {P['muted']}; margin-top: 2px; }}
+  .loc-addr {{ font-size: 12px; color: {P['muted']}; margin-top: 2px; opacity: 0.85; }}
+  .loc-map {{ display: inline-block; margin-top: 8px; padding: 6px 12px; border: 1px solid {P['accent']}; border-radius: 999px; font-size: 12px; color: {P['accent']}; font-weight: 600; }}
+  .rsvp-q {{ font-family: 'Playfair Display', serif; font-size: 20px; color: {P['text']}; margin-top: 24px; margin-bottom: 18px; line-height: 1.5; }}
+  .btn-yes, .btn-no {{ display: block; width: 100%; padding: 16px; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; margin-bottom: 10px; font-family: 'Inter', sans-serif; -webkit-tap-highlight-color: transparent; transition: transform 0.1s; }}
+  .btn-yes {{ background: {P['accent']}; color: #fff; }}
+  .btn-yes:active {{ transform: scale(0.97); }}
+  .btn-no {{ background: transparent; color: {P['muted']}; border: 1.5px solid {P['divider']}; }}
+  .btn-no:active {{ transform: scale(0.97); }}
+  .rsvp-done {{ padding: 22px; border-radius: 12px; font-family: 'Playfair Display', serif; font-size: 19px; }}
+  .rsvp-done.confirmed {{ background: {P['accentSoft']}; color: {P['text']}; }}
+  .rsvp-done.declined {{ background: {P['divider']}66; color: {P['text']}; }}
+  .footer {{ text-align: center; margin-top: 24px; font-size: 11px; color: {P['muted']}; font-family: 'Inter', sans-serif; letter-spacing: 3px; opacity: 0.7; }}
+  /* hero overlay for legibility (classic + vintage) */
+  .hero::after {{ content: ''; position: absolute; inset: 0; background: linear-gradient(180deg, transparent 50%, rgba(0,0,0,0.55) 100%); }}
+  .hero-text {{ position: absolute; bottom: 30px; left: 0; right: 0; text-align: center; color: #fff; z-index: 2; padding: 0 20px; }}
+  .hero-names {{ font-size: 34px; font-weight: 400; line-height: 1.2; letter-spacing: 1px; text-shadow: 0 2px 12px rgba(0,0,0,0.4); }}
+  .hero-names .amp {{ color: {P['accentSoft']}; font-style: italic; padding: 0 8px; }}
+  .hero-date {{ font-size: 13px; letter-spacing: 3px; margin-top: 10px; font-family: 'Inter', sans-serif; opacity: 0.95; }}
+"""
+
+    # Per-layout extras
+    if layout == "ornate":  # Gold — Art Deco
+        extra = f"""
+  body {{ background: {P['bg']}; }}
+  .card {{ border: 1px solid {P['accent']}55; box-shadow: 0 0 0 8px {P['card']}, 0 0 0 9px {P['accent']}55, 0 12px 40px rgba(184,134,47,0.18); margin-top: 20px; margin-bottom: 20px; }}
+  .deco-top, .deco-bot {{ height: 28px; background-image: linear-gradient(135deg, transparent 49%, {P['accent']} 49%, {P['accent']} 51%, transparent 51%), linear-gradient(45deg, transparent 49%, {P['accent']} 49%, {P['accent']} 51%, transparent 51%); background-size: 18px 18px; opacity: 0.5; }}
+  .deco-bot {{ transform: rotate(180deg); }}
+  .body {{ padding: 30px 32px 36px; }}
+  .monogram {{ font-family: 'Playfair Display', serif; font-style: italic; font-size: 56px; color: {P['accent']}; margin: -6px 0 8px; line-height: 1; letter-spacing: -2px; }}
+  .label-tiny {{ font-size: 10px; letter-spacing: 6px; color: {P['accent']}; text-transform: uppercase; margin-bottom: 16px; }}
+  .save-date-tag {{ display: inline-block; padding: 6px 18px; border: 1px solid {P['accent']}; border-radius: 999px; font-size: 10px; letter-spacing: 4px; color: {P['accent']}; margin-bottom: 14px; }}
+  .names-deco {{ font-family: 'Playfair Display', serif; font-size: 30px; color: {P['text']}; margin: 8px 0 10px; line-height: 1.15; }}
+  .names-deco .amp {{ color: {P['accent']}; font-style: italic; padding: 0 10px; font-size: 36px; }}
+  .date-row {{ display: flex; justify-content: center; align-items: center; gap: 16px; margin: 14px 0 24px; }}
+  .date-row .num {{ font-family: 'Playfair Display', serif; font-size: 36px; color: {P['accent']}; line-height: 1; }}
+  .date-row .lbl {{ font-size: 9px; letter-spacing: 2px; color: {P['muted']}; text-transform: uppercase; margin-top: 4px; }}
+  .date-sep {{ width: 1px; height: 36px; background: {P['accent']}55; }}
+  .ornament-row {{ display: flex; align-items: center; gap: 12px; margin: 18px 0; }}
+  .ornament-row .line {{ flex: 1; height: 1px; background: {P['accent']}55; }}
+  .ornament-row .dot {{ width: 6px; height: 6px; border-radius: 50%; background: {P['accent']}; transform: rotate(45deg); }}
+  .hero {{ aspect-ratio: 4/5; }}
+  .hero-text {{ display: none; }}
+  .hero::after {{ display: none; }}
+"""
+    elif layout == "luxe":  # Burgundy — Victorian / dark velvet
+        extra = f"""
+  body {{ background: radial-gradient(ellipse at top, {P['accentSoft']}, {P['bg']} 70%); padding: 32px 16px 40px; }}
+  .card {{ border: 1px solid {P['divider']}; box-shadow: 0 30px 80px rgba(0,0,0,0.55); position: relative; }}
+  .card::before {{ content: ''; position: absolute; inset: 12px; border: 1px solid {P['accent']}55; border-radius: 14px; pointer-events: none; }}
+  .eyebrow {{ display: inline-block; padding: 4px 14px; border: 1px solid {P['accent']}; border-radius: 0; font-size: 10px; letter-spacing: 6px; color: {P['accent']}; text-transform: uppercase; margin-bottom: 22px; }}
+  .body {{ padding: 40px 32px 40px; color: {P['text']}; }}
+  .intro {{ color: {P['muted']}; font-style: italic; }}
+  .luxe-names {{ font-family: 'Playfair Display', serif; font-size: 38px; color: {P['accent']}; margin: 8px 0 6px; letter-spacing: 1px; }}
+  .luxe-and {{ display: block; font-style: italic; font-size: 14px; color: {P['muted']}; letter-spacing: 4px; margin: 6px 0; }}
+  .luxe-divider {{ width: 60px; height: 2px; background: {P['accent']}; margin: 20px auto; }}
+  .luxe-date {{ font-family: 'Playfair Display', serif; font-size: 22px; color: {P['text']}; letter-spacing: 2px; }}
+  .luxe-weekday {{ font-size: 11px; letter-spacing: 4px; color: {P['muted']}; text-transform: uppercase; margin-top: 6px; }}
+  .family {{ background: {P['accentSoft']}33; border: 1px solid {P['divider']}55; }}
+  .family .fam-label {{ color: {P['accent']}; }}
+  .loc-event {{ color: {P['accent']}; letter-spacing: 1px; text-transform: uppercase; font-size: 13px; }}
+  .btn-no {{ color: {P['accent']}; border-color: {P['accent']}55; background: transparent; }}
+  .hero {{ display: none; }}
+  .photo-luxe {{ width: 200px; height: 240px; margin: 0 auto 18px; border-radius: 4px; overflow: hidden; border: 1px solid {P['accent']}55; box-shadow: 0 12px 30px rgba(0,0,0,0.4); }}
+  .photo-luxe img {{ width: 100%; height: 100%; object-fit: cover; }}
+  .photo-luxe-fallback {{ width: 200px; height: 240px; margin: 0 auto 18px; display: flex; align-items: center; justify-content: center; background: {P['accentSoft']}; color: {P['accent']}; font-size: 60px; }}
+"""
+    elif layout == "magazine":  # Marble — Editorial
+        extra = f"""
+  body {{ background: {P['bg']}; padding: 0; }}
+  .card {{ max-width: 520px; border-radius: 0; box-shadow: none; background: {P['card']}; }}
+  .mag-header {{ padding: 24px 28px 0; display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid {P['text']}; padding-bottom: 18px; }}
+  .mag-header .iss {{ font-size: 10px; letter-spacing: 3px; color: {P['muted']}; text-transform: uppercase; font-family: 'Inter', sans-serif; }}
+  .mag-header .iss strong {{ color: {P['text']}; }}
+  .mag-hero {{ position: relative; aspect-ratio: 1/1; overflow: hidden; background: {P['accentSoft']}; }}
+  .mag-hero img {{ width: 100%; height: 100%; object-fit: cover; filter: grayscale(8%) contrast(1.05); }}
+  .mag-hero-fallback {{ width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 90px; color: {P['accent']}; }}
+  .mag-numbers {{ display: grid; grid-template-columns: 1fr 1fr; gap: 0; padding: 0; border-bottom: 1px solid {P['text']}; }}
+  .mag-num-cell {{ padding: 28px 24px; border-right: 1px solid {P['text']}; }}
+  .mag-num-cell:last-child {{ border-right: none; }}
+  .mag-num {{ font-family: 'Playfair Display', serif; font-size: 64px; line-height: 1; color: {P['text']}; font-weight: 400; }}
+  .mag-lbl {{ font-size: 9px; letter-spacing: 3px; color: {P['muted']}; text-transform: uppercase; margin-top: 8px; font-family: 'Inter', sans-serif; }}
+  .body {{ padding: 32px 28px 40px; text-align: left; }}
+  .mag-eyebrow {{ font-size: 10px; letter-spacing: 4px; color: {P['muted']}; text-transform: uppercase; margin-bottom: 8px; }}
+  .mag-names {{ font-family: 'Playfair Display', serif; font-size: 56px; line-height: 0.95; color: {P['text']}; font-weight: 400; letter-spacing: -2px; margin-bottom: 4px; }}
+  .mag-names .amp {{ font-style: italic; color: {P['muted']}; font-size: 40px; padding: 0 4px; }}
+  .mag-rule {{ width: 32px; height: 2px; background: {P['text']}; margin: 18px 0; }}
+  .intro {{ text-align: left; font-size: 14px; line-height: 1.65; }}
+  .family {{ background: transparent; border-top: 1px solid {P['divider']}66; border-radius: 0; padding: 16px 0; }}
+  .fam-row {{ flex-direction: row; justify-content: space-between; align-items: baseline; padding: 4px 0; }}
+  .fam-label {{ font-size: 10px; }}
+  .loc {{ text-align: left; }}
+  .loc-time {{ font-style: normal; }}
+  .loc-event {{ text-transform: uppercase; letter-spacing: 2px; font-size: 12px; }}
+  .rsvp-q {{ text-align: left; font-size: 22px; }}
+  .footer {{ text-align: left; margin: 24px 28px 16px; padding-top: 16px; border-top: 1px solid {P['divider']}66; }}
+"""
+    elif layout == "botanical":  # Forest — leaves
+        extra = f"""
+  body {{ background: {P['bg']}; }}
+  body::before {{ content: ''; position: fixed; inset: 0; background-image: radial-gradient(circle at 10% 5%, {P['accentSoft']}55 0%, transparent 30%), radial-gradient(circle at 90% 95%, {P['accentSoft']}55 0%, transparent 35%); pointer-events: none; z-index: 0; }}
+  .card {{ position: relative; border: 1px solid {P['divider']}; }}
+  .leaf-svg {{ position: absolute; opacity: 0.45; pointer-events: none; }}
+  .leaf-tl {{ top: -10px; left: -10px; width: 110px; transform: rotate(-25deg); }}
+  .leaf-br {{ bottom: -10px; right: -10px; width: 130px; transform: rotate(155deg); }}
+  .body {{ padding: 36px 28px 40px; color: {P['text']}; position: relative; z-index: 1; }}
+  .bot-monogram {{ font-family: 'Playfair Display', serif; font-style: italic; font-size: 80px; color: {P['accent']}; line-height: 0.9; margin: -8px 0 8px; letter-spacing: -3px; }}
+  .bot-eyebrow {{ font-size: 10px; letter-spacing: 5px; color: {P['accent']}; text-transform: uppercase; margin-bottom: 10px; }}
+  .bot-names {{ font-family: 'Playfair Display', serif; font-size: 30px; color: {P['text']}; margin: 6px 0 12px; line-height: 1.2; }}
+  .bot-names .amp {{ font-style: italic; color: {P['accent']}; padding: 0 6px; }}
+  .bot-leaf-rule {{ display: flex; align-items: center; gap: 10px; margin: 20px 0; color: {P['accent']}; }}
+  .bot-leaf-rule .line {{ flex: 1; height: 1px; background: {P['accent']}66; }}
+  .intro {{ color: {P['muted']}; }}
+  .family {{ background: {P['accentSoft']}55; border-radius: 16px; }}
+  .fam-label {{ color: {P['accent']}; }}
+  .loc {{ border-color: {P['accent']}55; }}
+  .loc:last-of-type {{ border-color: {P['accent']}55; }}
+  .loc-time {{ color: {P['accent']}; }}
+  .loc-map {{ background: {P['accent']}; color: {P['bg']}; border-color: {P['accent']}; }}
+  .btn-no {{ color: {P['accentSoft']}; border-color: {P['accentSoft']}77; }}
+  .footer {{ color: {P['accent']}; }}
+  .hero {{ display: none; }}
+  .photo-bot {{ width: 220px; height: 220px; border-radius: 50%; margin: 0 auto 20px; overflow: hidden; border: 3px solid {P['accent']}; box-shadow: 0 12px 28px rgba(0,0,0,0.3); }}
+  .photo-bot img {{ width: 100%; height: 100%; object-fit: cover; }}
+  .photo-bot-fallback {{ width: 220px; height: 220px; border-radius: 50%; margin: 0 auto 20px; background: {P['accentSoft']}; display: flex; align-items: center; justify-content: center; font-size: 80px; color: {P['accent']}; border: 3px solid {P['accent']}; }}
+"""
+    elif layout == "vintage":  # Dusty Rose — boho watercolor
+        extra = f"""
+  body {{ background: linear-gradient(180deg, {P['bg']} 0%, {P['accentSoft']}88 100%); }}
+  .card {{ border-radius: 36px; border: 1px solid {P['divider']}; position: relative; overflow: visible; }}
+  .card::before {{ content: ''; position: absolute; top: -20px; left: 50%; transform: translateX(-50%); width: 80px; height: 80px; background: radial-gradient(circle, {P['accent']}55 0%, transparent 70%); pointer-events: none; }}
+  .vint-floral {{ width: 100px; height: 100px; margin: 18px auto -8px; opacity: 0.7; }}
+  .body {{ padding: 8px 28px 38px; }}
+  .vint-eyebrow {{ font-family: 'Playfair Display', serif; font-style: italic; font-size: 13px; color: {P['accent']}; letter-spacing: 4px; text-transform: uppercase; margin: 6px 0 4px; }}
+  .vint-names {{ font-family: 'Playfair Display', serif; font-size: 38px; line-height: 1.05; color: {P['accent']}; margin: 4px 0 6px; }}
+  .vint-names .amp {{ font-style: italic; color: {P['muted']}; font-size: 28px; padding: 0 6px; }}
+  .vint-ribbon {{ display: inline-block; background: {P['accent']}; color: #fff; padding: 6px 22px; font-family: 'Playfair Display', serif; font-style: italic; font-size: 13px; letter-spacing: 2px; border-radius: 999px; margin: 10px 0 18px; box-shadow: 0 6px 14px {P['accent']}55; }}
+  .intro {{ font-style: italic; }}
+  .family {{ background: {P['accentSoft']}55; border-radius: 20px; }}
+  .loc {{ border-color: {P['accent']}33; }}
+  .hero {{ display: none; }}
+  .photo-vint {{ width: 180px; height: 220px; margin: 18px auto 10px; border-radius: 999px; overflow: hidden; border: 3px solid {P['accent']}33; box-shadow: 0 12px 24px {P['accent']}22; }}
+  .photo-vint img {{ width: 100%; height: 100%; object-fit: cover; }}
+  .photo-vint-fallback {{ width: 180px; height: 220px; margin: 18px auto 10px; border-radius: 999px; background: {P['accentSoft']}; display: flex; align-items: center; justify-content: center; font-size: 60px; color: {P['accent']}; border: 3px solid {P['accent']}33; }}
+"""
+    else:  # classic (Ivory, Blush, Sage)
+        extra = ""
+
+    return base + extra
+
+
+# Reusable SVG snippets
+_LEAF_SVG = '''<svg class="leaf-svg leaf-tl" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M30 170 Q70 90 170 30 Q150 110 60 180 Z" fill="currentColor"/><path d="M70 130 L100 100 M50 150 L80 120" stroke="#1F2D1E" stroke-width="1.5" opacity="0.4"/></svg>'''
+_LEAF_SVG_BR = '''<svg class="leaf-svg leaf-br" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M30 170 Q70 90 170 30 Q150 110 60 180 Z" fill="currentColor"/><path d="M70 130 L100 100 M50 150 L80 120" stroke="#1F2D1E" stroke-width="1.5" opacity="0.4"/></svg>'''
+_FLORAL_SVG = '''<svg class="vint-floral" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><g fill="currentColor"><circle cx="50" cy="30" r="8"/><circle cx="35" cy="45" r="7"/><circle cx="65" cy="45" r="7"/><circle cx="50" cy="55" r="6"/><circle cx="42" cy="62" r="5"/><circle cx="58" cy="62" r="5"/></g><path d="M50 65 Q40 78 35 90 M50 65 Q60 78 65 90 M50 65 L50 92" stroke="currentColor" stroke-width="1.5" fill="none" opacity="0.7"/></svg>'''
+
+
+def _render_layout_classic(mireasa, mire, photo, data_long, data_short, weekday, palette, layout, L, family_html, locations_html, rsvp_html) -> str:
+    return f"""
+    <div class="hero">
+      {_photo_block(photo, layout)}
+      <div class="hero-text">
+        <div class="hero-names">{mireasa} <span class="amp">&</span> {mire}</div>
+        {f'<div class="hero-date">{data_long.upper()}</div>' if data_long else ''}
+      </div>
+    </div>
+    <div class="body">
+      <p class="intro">{L["intro"]}</p>
+      {family_html}
+      {locations_html}
+      {rsvp_html}
+    </div>"""
+
+
+def _render_layout_ornate(mireasa, mire, photo, data_long, data_short, weekday, palette, layout, L, family_html, locations_html, rsvp_html) -> str:
+    parts = data_short.split(".") if data_short else ["","",""]
+    day = parts[0] if len(parts) > 0 else ""
+    month = parts[1] if len(parts) > 1 else ""
+    year = parts[2] if len(parts) > 2 else ""
+    photo_html = _photo_block(photo, layout) if photo else ""
+    hero_html = f'<div class="hero">{photo_html}</div>' if photo else ""
+    return f"""
+    <div class="deco-top"></div>
+    {hero_html}
+    <div class="body">
+      <div class="save-date-tag">{L["save_date"]}</div>
+      <div class="ornament-row"><div class="line"></div><div class="dot"></div><div class="line"></div></div>
+      <div class="monogram">{(mireasa[:1] + ' & ' + mire[:1]).upper() if mireasa and mire else '&'}</div>
+      <div class="names-deco">{mireasa} <span class="amp">&</span> {mire}</div>
+      <div class="ornament-row"><div class="line"></div><div class="dot"></div><div class="line"></div></div>
+      {f'<div class="date-row"><div><div class="num">{day}</div><div class="lbl">{weekday or "&nbsp;"}</div></div><div class="date-sep"></div><div><div class="num">{month}</div><div class="lbl">{L["months"][int(month)-1] if month.isdigit() and 1<=int(month)<=12 else "&nbsp;"}</div></div><div class="date-sep"></div><div><div class="num">{year}</div><div class="lbl">&nbsp;</div></div></div>' if data_short else ''}
+      <p class="intro">{L["intro"]}</p>
+      {family_html}
+      {locations_html}
+      {rsvp_html}
+    </div>
+    <div class="deco-bot"></div>"""
+
+
+def _render_layout_luxe(mireasa, mire, photo, data_long, data_short, weekday, palette, layout, L, family_html, locations_html, rsvp_html) -> str:
+    photo_html = f'<div class="photo-luxe"><img src="{photo}" alt=""/></div>' if photo else f'<div class="photo-luxe-fallback">✦</div>'
+    return f"""
+    <div class="body">
+      {photo_html}
+      <div class="eyebrow">{L["save_date"]}</div>
+      <div class="luxe-names">{mireasa}</div>
+      <div class="luxe-and">— & —</div>
+      <div class="luxe-names">{mire}</div>
+      <div class="luxe-divider"></div>
+      {f'<div class="luxe-date">{data_long}</div>' if data_long else ''}
+      {f'<div class="luxe-weekday">{weekday}</div>' if weekday else ''}
+      <div class="luxe-divider"></div>
+      <p class="intro">{L["intro"]}</p>
+      {family_html}
+      {locations_html}
+      {rsvp_html}
+    </div>"""
+
+
+def _render_layout_magazine(mireasa, mire, photo, data_long, data_short, weekday, palette, layout, L, family_html, locations_html, rsvp_html) -> str:
+    parts = data_short.split(".") if data_short else ["","",""]
+    day = parts[0] if len(parts) > 0 else ""
+    month = parts[1] if len(parts) > 1 else ""
+    year = parts[2] if len(parts) > 2 else ""
+    photo_html = f'<img src="{photo}" alt=""/>' if photo else f'<div class="mag-hero-fallback">—</div>'
+    return f"""
+    <div class="mag-header">
+      <div class="iss"><strong>VOL. 01</strong> · {L["title"].upper()}</div>
+      <div class="iss">№ {year[-2:] if year else "—"}</div>
+    </div>
+    <div class="mag-hero">{photo_html}</div>
+    <div class="mag-numbers">
+      <div class="mag-num-cell"><div class="mag-num">{day or "—"}</div><div class="mag-lbl">{(weekday or '').upper()}</div></div>
+      <div class="mag-num-cell"><div class="mag-num">{month or "—"}.{year[-2:] if year else "—"}</div><div class="mag-lbl">{L["months"][int(month)-1].upper() if month.isdigit() and 1<=int(month)<=12 else ''}</div></div>
+    </div>
+    <div class="body">
+      <div class="mag-eyebrow">{L["save_date"]}</div>
+      <div class="mag-names">{mireasa}<br/><span class="amp">&</span> {mire}</div>
+      <div class="mag-rule"></div>
+      <p class="intro">{L["intro"]}</p>
+      {family_html}
+      {locations_html}
+      {rsvp_html}
+    </div>"""
+
+
+def _render_layout_botanical(mireasa, mire, photo, data_long, data_short, weekday, palette, layout, L, family_html, locations_html, rsvp_html) -> str:
+    photo_html = f'<div class="photo-bot"><img src="{photo}" alt=""/></div>' if photo else f'<div class="photo-bot-fallback">✿</div>'
+    return f"""
+    <div style="color: {palette['accent']}">
+      {_LEAF_SVG}
+      {_LEAF_SVG_BR}
+    </div>
+    <div class="body">
+      {photo_html}
+      <div class="bot-eyebrow">{L["save_date"]}</div>
+      <div class="bot-monogram">{(mireasa[:1] + '&' + mire[:1]) if mireasa and mire else '&'}</div>
+      <div class="bot-names">{mireasa} <span class="amp">&</span> {mire}</div>
+      <div class="bot-leaf-rule">
+        <div class="line"></div>
+        <span style="font-size:14px">✿</span>
+        <div class="line"></div>
+      </div>
+      {('<div style="font-family: ' + chr(39) + 'Playfair Display' + chr(39) + ', serif; font-size: 18px; color: ' + palette['accent'] + '; letter-spacing: 2px;">' + data_long + '</div>') if data_long else ''}
+      {('<div style="font-size: 11px; letter-spacing: 4px; color: ' + palette['muted'] + '; text-transform: uppercase; margin-top: 4px;">' + weekday + '</div>') if weekday else ''}
+      <div class="bot-leaf-rule">
+        <div class="line"></div>
+        <span style="font-size:14px">✿</span>
+        <div class="line"></div>
+      </div>
+      <p class="intro">{L["intro"]}</p>
+      {family_html}
+      {locations_html}
+      {rsvp_html}
+    </div>"""
+
+
+def _render_layout_vintage(mireasa, mire, photo, data_long, data_short, weekday, palette, layout, L, family_html, locations_html, rsvp_html) -> str:
+    photo_html = f'<div class="photo-vint"><img src="{photo}" alt=""/></div>' if photo else f'<div class="photo-vint-fallback">♥</div>'
+    return f"""
+    <div style="color: {palette['accent']}; text-align: center;">
+      {_FLORAL_SVG}
+    </div>
+    <div class="body">
+      <div class="vint-eyebrow">{L["intro_short"]}</div>
+      {photo_html}
+      <div class="vint-names">{mireasa} <span class="amp">&</span> {mire}</div>
+      {f'<div class="vint-ribbon">{data_long}</div>' if data_long else ''}
+      <p class="intro">{L["intro"]}</p>
+      {family_html}
+      {locations_html}
+      {rsvp_html}
+    </div>"""
+
+
 def _render_invitation(code: str, invitat: dict, user: dict, setup: dict) -> str:
-    guest_nume = invitat.get("nume", "")
-    already_confirmed = invitat.get("confirmat") == "confirmat"
-    already_declined = invitat.get("confirmat") == "refuzat"
+    # Couple names
     mireasa = setup.get("mireasa") or (user.get("display_name") or "").split("&")[0].strip() or "Mireasa"
     mire = setup.get("mire") or ""
     if not mire and "&" in (user.get("display_name") or ""):
         mire = (user.get("display_name") or "").split("&", 1)[1].strip()
     mire = mire or "Mirele"
-    data_nunta = user.get("data_nunta") or ""
-    data_fmt = ""
-    if data_nunta:
-        try:
-            dt = datetime.fromisoformat(data_nunta.replace("Z", "+00:00"))
-            luni = ["ianuarie", "februarie", "martie", "aprilie", "mai", "iunie", "iulie", "august", "septembrie", "octombrie", "noiembrie", "decembrie"]
-            data_fmt = f"{dt.day} {luni[dt.month - 1]} {dt.year}"
-        except Exception:
-            data_fmt = data_nunta
+
+    # Language — use bride/groom's profile language; fallback to ro
+    lang = (user.get("language") or "ro").lower()
+    if lang not in INV_I18N:
+        lang = "ro"
+    L = INV_I18N[lang]
+
+    # Date
+    data_long, data_short, weekday = _format_invitation_date(user.get("data_nunta") or "", lang)
+
+    # Theme
+    raw_theme = setup.get("theme") or "ivory_elegant"
+    theme_key = _THEME_LEGACY.get(raw_theme, raw_theme)
+    if theme_key not in THEME_DATA:
+        theme_key = "ivory_elegant"
+    palette = THEME_DATA[theme_key]
+    layout = palette["layout"]
+
+    # Common blocks
     photo = setup.get("couple_photo") or ""
-    locations = setup.get("locations") or []
-    godparents = setup.get("godparents") or {}
-    godp_txt = ""
-    if godparents.get("nume_nasa") or godparents.get("nume_nas"):
-        n1 = godparents.get("nume_nasa") or ""
-        n2 = godparents.get("nume_nas") or ""
-        godp_txt = f"<p class='godparents'>Nași: {n1}{' & ' if n1 and n2 else ''}{n2}</p>"
+    family_html = _build_family_block(setup, L)
+    locations_html = _build_locations_block(setup.get("locations") or [], palette, L)
+    guest_nume = invitat.get("nume", "")
+    rsvp_html = _rsvp_block(code, guest_nume, invitat.get("confirmat") or "in_asteptare", L)
 
-    locations_html = ""
-    for loc in locations:
-        if loc.get("eveniment") or loc.get("locatie"):
-            ora = loc.get("ora", "")
-            ev = loc.get("eveniment", "")
-            locatie = loc.get("locatie", "")
-            adresa = loc.get("adresa", "")
-            locations_html += f"""
-            <div class="loc">
-              <div class="loc-time">{ora}</div>
-              <div class="loc-event">{ev}</div>
-              <div class="loc-place">{locatie}</div>
-              {f'<div class="loc-addr">{adresa}</div>' if adresa else ''}
-            </div>"""
+    # Render layout
+    layout_renderers = {
+        "classic": _render_layout_classic,
+        "ornate": _render_layout_ornate,
+        "luxe": _render_layout_luxe,
+        "magazine": _render_layout_magazine,
+        "botanical": _render_layout_botanical,
+        "vintage": _render_layout_vintage,
+    }
+    inner_html = layout_renderers.get(layout, _render_layout_classic)(
+        mireasa, mire, photo, data_long, data_short, weekday, palette, layout, L,
+        family_html, locations_html, rsvp_html,
+    )
 
-    photo_block = f'<img src="{photo}" alt="" class="couple-photo" />' if photo else '<div class="heart">💕</div>'
-
-    rsvp_block = ""
-    if already_confirmed:
-        rsvp_block = '<div class="rsvp-done confirmed">Ne bucurăm! Te așteptăm! 🎊</div>'
-    elif already_declined:
-        rsvp_block = '<div class="rsvp-done declined">Îți mulțumim că ne-ai anunțat! 💕</div>'
-    else:
-        rsvp_block = f'''
-        <p class="rsvp-q">Dragă <strong>{guest_nume}</strong>,<br/>ne onorezi cu prezența?</p>
-        <button class="btn-yes" onclick="rsvp('confirmat')">✓ Vin cu drag!</button>
-        <button class="btn-no" onclick="rsvp('refuzat')">✗ Nu pot veni</button>
-        <div id="submitting" style="display:none;margin-top:12px;color:#888">Se trimite...</div>
-        '''
+    css = _theme_css(palette, layout)
 
     return f"""<!DOCTYPE html>
-<html lang="ro">
+<html lang="{lang}">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Invitație nuntă — {mireasa} & {mire}</title>
-<style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: 'Playfair Display', Georgia, serif; background: linear-gradient(180deg, #FFF8F5 0%, #FDE6EC 100%); color: #2d2d2d; min-height: 100vh; padding: 24px 16px; }}
-  .card {{ max-width: 480px; margin: 0 auto; background: #fff; border-radius: 24px; box-shadow: 0 12px 40px rgba(232, 120, 154, 0.18); overflow: hidden; }}
-  .hero {{ position: relative; width: 100%; aspect-ratio: 3/4; background: #F5D5DC; display: flex; align-items: center; justify-content: center; overflow: hidden; }}
-  .couple-photo {{ width: 100%; height: 100%; object-fit: cover; }}
-  .heart {{ font-size: 120px; opacity: 0.35; }}
-  .hero::after {{ content: ''; position: absolute; inset: 0; background: linear-gradient(180deg, transparent 50%, rgba(0,0,0,0.6) 100%); }}
-  .hero-text {{ position: absolute; bottom: 30px; left: 0; right: 0; text-align: center; color: #fff; z-index: 2; padding: 0 20px; }}
-  .hero-names {{ font-size: 34px; font-weight: 400; line-height: 1.2; letter-spacing: 1px; text-shadow: 0 2px 12px rgba(0,0,0,0.3); }}
-  .hero-names .amp {{ color: #FFD4DE; font-style: italic; padding: 0 6px; }}
-  .hero-date {{ font-size: 13px; letter-spacing: 3px; margin-top: 10px; font-family: 'Inter', sans-serif; opacity: 0.95; }}
-  .body {{ padding: 32px 28px 40px; text-align: center; font-family: 'Inter', sans-serif; }}
-  .intro {{ font-size: 15px; color: #6b6b6b; line-height: 1.7; margin-bottom: 22px; }}
-  .godparents {{ font-size: 14px; color: #8e7a80; font-style: italic; margin-bottom: 20px; }}
-  .loc {{ border-top: 1px solid #f0e0e5; padding: 18px 0; }}
-  .loc:last-of-type {{ border-bottom: 1px solid #f0e0e5; margin-bottom: 24px; }}
-  .loc-time {{ font-family: 'Playfair Display', serif; font-size: 22px; color: #E8789A; font-style: italic; }}
-  .loc-event {{ font-size: 15px; font-weight: 600; color: #2d2d2d; margin-top: 4px; }}
-  .loc-place {{ font-size: 13px; color: #6b6b6b; margin-top: 2px; }}
-  .loc-addr {{ font-size: 12px; color: #8e8e8e; margin-top: 2px; }}
-  .rsvp-q {{ font-family: 'Playfair Display', serif; font-size: 20px; color: #2d2d2d; margin-top: 24px; margin-bottom: 18px; line-height: 1.5; }}
-  .btn-yes, .btn-no {{ display: block; width: 100%; padding: 16px; border: none; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; margin-bottom: 10px; font-family: 'Inter', sans-serif; -webkit-tap-highlight-color: transparent; transition: transform 0.1s; }}
-  .btn-yes {{ background: #E8789A; color: #fff; }}
-  .btn-yes:active {{ transform: scale(0.97); }}
-  .btn-no {{ background: #fff; color: #8e8e8e; border: 1.5px solid #e5d8de; }}
-  .btn-no:active {{ transform: scale(0.97); }}
-  .rsvp-done {{ padding: 22px; border-radius: 12px; font-family: 'Playfair Display', serif; font-size: 19px; }}
-  .rsvp-done.confirmed {{ background: #FDE6EC; color: #2d2d2d; }}
-  .rsvp-done.declined {{ background: #F5E5E5; color: #2d2d2d; }}
-  .footer {{ text-align: center; margin-top: 24px; font-size: 11px; color: #b8a5ac; font-family: 'Inter', sans-serif; letter-spacing: 2px; }}
-</style>
+<title>{L['title']} — {mireasa} & {mire}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>{css}</style>
 </head>
 <body>
   <div class="card">
-    <div class="hero">
-      {photo_block}
-      <div class="hero-text">
-        <div class="hero-names">{mireasa} <span class="amp">&</span> {mire}</div>
-        {f'<div class="hero-date">{data_fmt.upper()}</div>' if data_fmt else ''}
-      </div>
-    </div>
-    <div class="body">
-      <p class="intro">Ne-ar face mare bucurie să ne fii alături<br/>în cea mai importantă zi a vieții noastre.</p>
-      {godp_txt}
-      {locations_html}
-      {rsvp_block}
-    </div>
+    {inner_html}
   </div>
-  <div class="footer">NUNTA MEA</div>
+  <div class="footer">{L['footer']}</div>
 <script>
 async function rsvp(status) {{
   const btns = document.querySelectorAll('.btn-yes, .btn-no');
   btns.forEach(b => b.disabled = true);
-  document.getElementById('submitting').style.display = 'block';
+  var sub = document.getElementById('submitting');
+  if (sub) sub.style.display = 'block';
   try {{
     const r = await fetch('/api/invitation/{code}/rsvp', {{
       method: 'POST',
@@ -1217,9 +1707,9 @@ async function rsvp(status) {{
     if (!r.ok) throw new Error('Eroare');
     location.reload();
   }} catch (e) {{
-    alert('A apărut o eroare. Te rugăm să încerci din nou.');
+    alert({L["err"]!r});
     btns.forEach(b => b.disabled = false);
-    document.getElementById('submitting').style.display = 'none';
+    if (sub) sub.style.display = 'none';
   }}
 }}
 </script>
