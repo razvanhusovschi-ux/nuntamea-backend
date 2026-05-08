@@ -175,6 +175,35 @@ class PushTokenIn(BaseModel):
     platform: Optional[str] = "android"
 
 
+# ---------- Premium / Billing Models ----------
+PREMIUM_FIELDS_DEFAULT = {
+    "is_premium": False,
+    "premium_purchased_at": None,
+    "premium_source": None,  # "mock" | "play_store" | "app_store" | "revenuecat"
+    "revenuecat_user_id": None,
+}
+
+
+def _ensure_premium_defaults(user: dict) -> dict:
+    """Inject premium fields with defaults if missing on legacy users."""
+    if not user:
+        return user
+    for k, v in PREMIUM_FIELDS_DEFAULT.items():
+        user.setdefault(k, v)
+    return user
+
+
+class GrantMockPremiumIn(BaseModel):
+    confirm: bool = True  # safety flag
+
+
+class VerifyReceiptIn(BaseModel):
+    """For future production verification via RevenueCat REST API."""
+    revenuecat_user_id: Optional[str] = None
+    play_store_token: Optional[str] = None
+    product_id: Optional[str] = None
+
+
 # ---------- Auth ----------
 @api.post("/auth/register")
 async def register(body: RegisterIn):
@@ -190,6 +219,7 @@ async def register(body: RegisterIn):
         "buget_total": 0,
         "data_nunta": None,
         "created_at": now_iso(),
+        **PREMIUM_FIELDS_DEFAULT,
     }
     await db.users.insert_one(doc)
     token = create_token(uid, email)
@@ -206,11 +236,13 @@ async def login(body: LoginIn):
     token = create_token(u["uid"], u["email"])
     u.pop("_id", None)
     u.pop("password_hash", None)
+    _ensure_premium_defaults(u)
     return {"user": u, "access_token": token}
 
 
 @api.get("/auth/me")
 async def me(user=Depends(get_current_user)):
+    _ensure_premium_defaults(user)
     return {"user": user}
 
 
@@ -807,11 +839,179 @@ async def download_ro_locale():
     raise HTTPException(status_code=404, detail="Locale file not found")
 
 
+@api.get("/assets/locale-it-template")
+async def download_it_template():
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/it_template.json"
+    if _os.path.exists(p):
+        return FileResponse(p, media_type="application/json", filename="it.json")
+    raise HTTPException(status_code=404, detail="Template not found")
+
+
+@api.get("/assets/locale-es-template")
+async def download_es_template():
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/es_template.json"
+    if _os.path.exists(p):
+        return FileResponse(p, media_type="application/json", filename="es.json")
+    raise HTTPException(status_code=404, detail="Template not found")
+
+
+# ---------- Billing / Premium ----------
+SANDBOX_BILLING = os.environ.get("BILLING_SANDBOX", "true").lower() == "true"
+
+# Free tier limits (sent to client; UI enforces with grandfathering)
+FREE_LIMITS = {
+    "invitati_max": 20,
+    "furnizori_max": 3,
+    "checklist_personal_max": 10,
+    "cheltuieli_max": 3,
+}
+
+PREMIUM_THEMES = ["gold_glamour", "burgundy_passion", "marble_modern", "forest_woodland", "dusty_rose"]
+FREE_THEMES = ["ivory_elegant", "blush_romance", "sage_garden"]
+
+
+@api.get("/billing/status")
+async def billing_status(user=Depends(get_current_user)):
+    """Returns the user's premium status + free-tier limits + sandbox flag."""
+    _ensure_premium_defaults(user)
+    return {
+        "is_premium": bool(user.get("is_premium")),
+        "premium_purchased_at": user.get("premium_purchased_at"),
+        "premium_source": user.get("premium_source"),
+        "free_limits": FREE_LIMITS,
+        "premium_themes": PREMIUM_THEMES,
+        "free_themes": FREE_THEMES,
+        "sandbox": SANDBOX_BILLING,
+        "product_id": "premium_lifetime",
+        "default_price_string": "$6.99",
+    }
+
+
+@api.post("/billing/grant-mock")
+async def billing_grant_mock(body: GrantMockPremiumIn, user=Depends(get_current_user)):
+    """DEV/SANDBOX-ONLY: grants premium without real payment, for UX testing.
+    In production, this endpoint is disabled; clients use /billing/verify-receipt instead."""
+    if not SANDBOX_BILLING:
+        raise HTTPException(status_code=403, detail="Sandbox mode disabled in production")
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="Confirmation required")
+    await db.users.update_one(
+        {"uid": user["uid"]},
+        {"$set": {
+            "is_premium": True,
+            "premium_purchased_at": now_iso(),
+            "premium_source": "mock",
+        }},
+    )
+    return {"ok": True, "is_premium": True, "source": "mock"}
+
+
+@api.post("/billing/revoke-mock")
+async def billing_revoke_mock(user=Depends(get_current_user)):
+    """DEV/SANDBOX-ONLY: revokes premium for re-testing the upgrade flow."""
+    if not SANDBOX_BILLING:
+        raise HTTPException(status_code=403, detail="Sandbox mode disabled in production")
+    await db.users.update_one(
+        {"uid": user["uid"]},
+        {"$set": {**PREMIUM_FIELDS_DEFAULT}},
+    )
+    return {"ok": True, "is_premium": False}
+
+
+@api.post("/billing/verify-receipt")
+async def billing_verify_receipt(body: VerifyReceiptIn, user=Depends(get_current_user)):
+    """PRODUCTION: verifies a Google Play / RevenueCat receipt and grants premium.
+
+    For now in sandbox mode, this acts the same as grant-mock. In production, replace
+    with real verification via RevenueCat REST API or Google Play Developer API.
+    """
+    if SANDBOX_BILLING:
+        # Forward to mock handler logic
+        await db.users.update_one(
+            {"uid": user["uid"]},
+            {"$set": {
+                "is_premium": True,
+                "premium_purchased_at": now_iso(),
+                "premium_source": "sandbox",
+                "revenuecat_user_id": body.revenuecat_user_id,
+            }},
+        )
+        return {"ok": True, "is_premium": True, "source": "sandbox"}
+
+    # ============ PRODUCTION PATH (RevenueCat REST API) ============
+    rc_secret = os.environ.get("REVENUECAT_SECRET_KEY", "")
+    if not rc_secret:
+        raise HTTPException(status_code=503, detail="RevenueCat not configured")
+    if not body.revenuecat_user_id:
+        raise HTTPException(status_code=400, detail="revenuecat_user_id required")
+    try:
+        import httpx  # already in requirements
+        async with httpx.AsyncClient(timeout=10.0) as cli:
+            r = await cli.get(
+                f"https://api.revenuecat.com/v1/subscribers/{body.revenuecat_user_id}",
+                headers={"Authorization": f"Bearer {rc_secret}", "Accept": "application/json"},
+            )
+            if r.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"RC verify failed: {r.status_code}")
+            data = r.json()
+            entitlements = (data.get("subscriber") or {}).get("entitlements") or {}
+            premium_ent = entitlements.get("premium_lifetime") or entitlements.get("premium")
+            active = bool(premium_ent and premium_ent.get("expires_date") is None)  # lifetime
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"RC verify error: {e}")
+
+    if active:
+        await db.users.update_one(
+            {"uid": user["uid"]},
+            {"$set": {
+                "is_premium": True,
+                "premium_purchased_at": now_iso(),
+                "premium_source": "revenuecat",
+                "revenuecat_user_id": body.revenuecat_user_id,
+            }},
+        )
+        return {"ok": True, "is_premium": True, "source": "revenuecat"}
+    return {"ok": False, "is_premium": False, "reason": "no_active_entitlement"}
+
+
+@api.post("/billing/restore")
+async def billing_restore(user=Depends(get_current_user)):
+    """Restore premium status: re-fetches RC entitlements (or returns current MongoDB state in sandbox)."""
+    _ensure_premium_defaults(user)
+    if SANDBOX_BILLING:
+        # Sandbox: just return what's in DB
+        return {
+            "ok": True,
+            "is_premium": bool(user.get("is_premium")),
+            "source": user.get("premium_source"),
+            "restored": False,  # nothing to restore in sandbox
+        }
+    # Production: re-verify via RC REST API using stored revenuecat_user_id
+    rc_uid = user.get("revenuecat_user_id")
+    if not rc_uid:
+        return {"ok": True, "is_premium": False, "restored": False, "reason": "no_rc_id"}
+    return await billing_verify_receipt(
+        VerifyReceiptIn(revenuecat_user_id=rc_uid),
+        user=user,
+    )
+
+
 @api.get("/assets/server-source")
 async def download_server_source():
-    """Download current backend source files (server.py + notifications.py + requirements.txt) as a tar.gz."""
+    """Download latest backend source archive (v1.1.0)."""
     from fastapi.responses import FileResponse
     import os as _os, tarfile, tempfile
+    # Prefer pre-built tarball
+    pre = "/app/backend_v1.1.0.tar.gz"
+    if _os.path.exists(pre):
+        return FileResponse(pre, media_type="application/gzip", filename="nuntamea-backend-v1.1.0.tar.gz")
+    # Fallback: build minimal tar on the fly
     files = ["/app/backend/server.py", "/app/backend/notifications.py", "/app/backend/requirements.txt"]
     files = [f for f in files if _os.path.exists(f)]
     if not files:
@@ -821,7 +1021,63 @@ async def download_server_source():
     with tarfile.open(out.name, "w:gz") as tar:
         for f in files:
             tar.add(f, arcname=_os.path.basename(f))
-    return FileResponse(out.name, media_type="application/gzip", filename="nuntamea-backend-v1.0.9.tar.gz")
+    return FileResponse(out.name, media_type="application/gzip", filename="nuntamea-backend-v1.1.0.tar.gz")
+
+
+@api.get("/assets/frontend-source")
+async def download_frontend_source():
+    """Download full frontend source (without node_modules) as a tar.gz — v1.1.0."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    candidates = ["/app/frontend_v1.1.0.tar.gz", "/app/nuntamea-frontend-v1.1.0.tar.gz"]
+    for p in candidates:
+        if _os.path.exists(p):
+            return FileResponse(p, media_type="application/gzip", filename="nuntamea-frontend-v1.1.0.tar.gz")
+    raise HTTPException(status_code=404, detail="Frontend archive not built")
+
+
+@api.get("/assets/deploy-final")
+async def download_deploy_doc():
+    """Download the v1.1.0 final deploy markdown (release notes + build instructions)."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/DEPLOY_FINAL_v1.1.0.md"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="Deploy doc missing")
+    return FileResponse(p, media_type="text/markdown; charset=utf-8", filename="DEPLOY_FINAL_v1.1.0.md")
+
+
+@api.get("/assets/locale-ro")
+async def download_locale_ro():
+    """Download the source-of-truth ro.json (all 758 keys) for external translation."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/frontend/src/i18n/ro.json"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ro.json missing")
+    return FileResponse(p, media_type="application/json; charset=utf-8", filename="ro.json")
+
+
+@api.get("/assets/locale-template")
+async def download_locale_template():
+    """Download a tar.gz with all 4 locale files (ro source + en/it/es with RO placeholders)
+    and a translation README explaining what's new."""
+    from fastapi.responses import FileResponse
+    import os as _os, tarfile, tempfile
+    src = "/app/frontend/src/i18n"
+    files = ["ro.json", "en.json", "it.json", "es.json"]
+    out = tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False)
+    out.close()
+    with tarfile.open(out.name, "w:gz") as tar:
+        for f in files:
+            full = _os.path.join(src, f)
+            if _os.path.exists(full):
+                tar.add(full, arcname=f"locales/{f}")
+        # Add a README with translation instructions
+        readme_path = "/app/TRANSLATION_README_v1.1.0.md"
+        if _os.path.exists(readme_path):
+            tar.add(readme_path, arcname="TRANSLATION_README.md")
+    return FileResponse(out.name, media_type="application/gzip", filename="nuntamea-locales-v1.1.0.tar.gz")
 
 
 def _render_not_found() -> str:
