@@ -12,6 +12,7 @@ import bcrypt
 import jwt
 import secrets
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, BackgroundTasks
+from fastapi.responses import HTMLResponse, FileResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
@@ -753,7 +754,7 @@ async def public_rsvp(code: str, body: RsvpIn, background: BackgroundTasks):
 
 
 # ---------- Public HTML invitation page (served at /invite/{code}, no /api prefix) ----------
-@app.get("/reset-password", response_class=None)
+@app.get("/reset-password", response_class=HTMLResponse, include_in_schema=False)
 async def reset_password_page(token: str = ""):
     """Public HTML page for password reset (linked from email)."""
     from fastapi.responses import HTMLResponse
@@ -832,7 +833,7 @@ f.addEventListener('submit',async e=>{{
 
 
 # ---------- Public HTML invitation page (served at /invite/{code}, no /api prefix) ----------
-@app.get("/invite/{code}", response_class=None)
+@app.get("/invite/{code}", response_class=HTMLResponse, include_in_schema=False)
 async def public_invitation_html(code: str):
     from fastapi.responses import HTMLResponse
     invitat = await db.invitati.find_one({"id": code}, {"_id": 0})
@@ -846,7 +847,7 @@ async def public_invitation_html(code: str):
 
 
 # ---------- Asset download helpers (Play Store icon, etc.) ----------
-@api.get("/assets/play-store-icon")
+@api.get("/assets/play-store-icon", include_in_schema=False)
 async def download_play_store_icon():
     from fastapi.responses import FileResponse
     import os as _os
@@ -864,7 +865,7 @@ async def download_play_store_icon():
     raise HTTPException(status_code=404, detail="Asset not found")
 
 
-@api.get("/assets/locale-ro")
+@api.get("/assets/locale-ro", include_in_schema=False)
 async def download_ro_locale():
     from fastapi.responses import FileResponse
     import os as _os
@@ -874,7 +875,7 @@ async def download_ro_locale():
     raise HTTPException(status_code=404, detail="Locale file not found")
 
 
-@api.get("/assets/locale-it-template")
+@api.get("/assets/locale-it-template", include_in_schema=False)
 async def download_it_template():
     from fastapi.responses import FileResponse
     import os as _os
@@ -884,7 +885,7 @@ async def download_it_template():
     raise HTTPException(status_code=404, detail="Template not found")
 
 
-@api.get("/assets/locale-es-template")
+@api.get("/assets/locale-es-template", include_in_schema=False)
 async def download_es_template():
     from fastapi.responses import FileResponse
     import os as _os
@@ -1037,7 +1038,7 @@ async def billing_restore(user=Depends(get_current_user)):
     )
 
 
-@api.get("/assets/server-source")
+@api.get("/assets/server-source", include_in_schema=False)
 async def download_server_source():
     """Download latest backend source archive (v1.2.5)."""
     from fastapi.responses import FileResponse
@@ -1055,7 +1056,7 @@ async def download_server_source():
     return FileResponse(out.name, media_type="application/gzip", filename="nuntamea-backend-v1.2.5.tar.gz")
 
 
-@api.get("/assets/server-py")
+@api.get("/assets/server-py", include_in_schema=False)
 async def download_server_py_only():
     """Download just the latest server.py (v1.2.5) — for quick replacement on Render."""
     from fastapi.responses import FileResponse
@@ -1066,7 +1067,7 @@ async def download_server_py_only():
     return FileResponse(p, media_type="text/x-python; charset=utf-8", filename="server_v1.2.6.py")
 
 
-@api.get("/assets/frontend-source")
+@api.get("/assets/frontend-source", include_in_schema=False)
 async def download_frontend_source():
     """Download full frontend source (without node_modules) as a tar.gz — v1.2.5."""
     from fastapi.responses import FileResponse
@@ -1092,7 +1093,7 @@ async def download_frontend_source():
     return FileResponse(out.name, media_type="application/gzip", filename="nuntamea-frontend-v1.2.5.tar.gz")
 
 
-@api.get("/assets/deploy-final")
+@api.get("/assets/deploy-final", include_in_schema=False)
 async def download_deploy_doc():
     """Download the final deploy markdown (release notes + build instructions)."""
     from fastapi.responses import FileResponse
@@ -1105,7 +1106,7 @@ async def download_deploy_doc():
     raise HTTPException(status_code=404, detail="Deploy doc missing")
 
 
-@api.get("/assets/frontend-file")
+@api.get("/assets/frontend-file", include_in_schema=False)
 async def download_frontend_file(path: str):
     """Download any individual frontend file by relative path (e.g. ?path=app.json).
     Sandboxed to /app/frontend only.
@@ -1131,7 +1132,7 @@ async def download_frontend_file(path: str):
                         filename=_os.path.basename(target))
 
 
-@api.get("/assets/manifest-v126")
+@api.get("/assets/manifest-v126", include_in_schema=False)
 async def manifest_v126():
     """Return list of v1.2.6 changed frontend files for individual GitHub upload."""
     files_v126 = [
@@ -1179,7 +1180,7 @@ async def manifest_v126():
 
 
 
-@api.get("/assets/locale-ro")
+@api.get("/assets/locale-ro", include_in_schema=False)
 async def download_locale_ro():
     """Download the source-of-truth ro.json (all 758 keys) for external translation."""
     from fastapi.responses import FileResponse
@@ -1190,7 +1191,7 @@ async def download_locale_ro():
     return FileResponse(p, media_type="application/json; charset=utf-8", filename="ro.json")
 
 
-@api.get("/assets/locale-template")
+@api.get("/assets/locale-template", include_in_schema=False)
 async def download_locale_template():
     """Download a tar.gz with all 4 locale files (ro source + en/it/es with RO placeholders)
     and a translation README explaining what's new."""
