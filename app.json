@@ -1,0 +1,82 @@
+{
+  "expo": {
+    "name": "My Wedding · Nunta Mea",
+    "slug": "nuntamea",
+    "version": "1.2.6",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "nuntamea",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "primaryColor": "#E8789A",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.cybermediabacau.nuntamea",
+      "buildNumber": "6",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "Încarcă o poză a cuplului pentru invitație",
+        "NSPhotoLibraryAddUsageDescription": "Salvează poze din invitație în galerie",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.cybermediabacau.nuntamea",
+      "versionCode": 20,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#FFF8F5"
+      },
+      "edgeToEdgeEnabled": true,
+      "permissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#FFF8F5"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Aplicația folosește galeria pentru a încărca poza cuplului în invitație.",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ],
+      "@react-native-community/datetimepicker",
+      "expo-web-browser",
+      [
+        "expo-notifications",
+        {
+          "color": "#E8789A",
+          "defaultChannel": "default"
+        }
+      ],
+      "expo-localization"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "f0c5af61-6a65-40c8-92ae-43e8f5c65e6c"
+      }
+    },
+    "owner": "razvanhsovschi"
+  }
+}
