@@ -451,6 +451,19 @@ async def del_cheltuiala(item_id: str, user=Depends(get_current_user)):
     return {"deleted": res.deleted_count}
 
 
+@api.put("/cheltuieli/{item_id}")
+async def upd_cheltuiala(item_id: str, body: CheltuialaIn, user=Depends(get_current_user)):
+    """Edit a manual expense. Vendor-linked expenses (id starting with 'furn_') cannot be edited here."""
+    if item_id.startswith("furn_"):
+        raise HTTPException(status_code=400, detail="Cheltuielile legate de furnizori se editează din tab Furnizori")
+    upd = {"titlu": body.titlu, "suma": float(body.suma), "categoria": body.categoria}
+    res = await db.cheltuieli.update_one({"id": item_id, "user_id": user["uid"]}, {"$set": upd})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Cheltuială inexistentă")
+    fresh = await db.cheltuieli.find_one({"id": item_id, "user_id": user["uid"]}, {"_id": 0})
+    return {"item": fresh}
+
+
 # ---------- Furnizori ----------
 async def _sync_furnizor_to_buget(furnizor: dict):
     """Auto-create/update a linked cheltuiala when furnizor has avans > 0.
@@ -632,9 +645,31 @@ async def edit_timeline(item_id: str, body: TimelineIn, user=Depends(get_current
 
 
 # ---------- Health ----------
+APP_VERSION = "1.2.5"
+
 @api.get("/")
 async def root():
-    return {"message": "NuntaMea API"}
+    return {"message": "NuntaMea API", "version": APP_VERSION}
+
+
+@api.get("/version")
+async def version_check():
+    """Returns the running server version + list of registered route methods. 
+    Use this to verify Render has deployed the latest code."""
+    routes_info = {}
+    for r in app.routes:
+        if hasattr(r, "path") and hasattr(r, "methods"):
+            path = r.path
+            if "/api/" in path:
+                routes_info.setdefault(path, set()).update(r.methods or set())
+    return {
+        "version": APP_VERSION,
+        "supports_edit_cheltuiala": "PUT" in routes_info.get("/api/cheltuieli/{item_id}", set()),
+        "themes": ["ivory_elegant","blush_romance","sage_garden","gold_glamour","burgundy_passion","marble_modern","forest_woodland","dusty_rose"],
+        "translations_check": {
+            "inv_i18n_keys": list(INV_I18N.keys()) if "INV_I18N" in dir() else [],
+        },
+    }
 
 
 # ---------- Invitation Setup (auth) ----------
@@ -1004,7 +1039,7 @@ async def billing_restore(user=Depends(get_current_user)):
 
 @api.get("/assets/server-source")
 async def download_server_source():
-    """Download latest backend source archive (v1.2.1)."""
+    """Download latest backend source archive (v1.2.5)."""
     from fastapi.responses import FileResponse
     import os as _os, tarfile, tempfile
     # Build a fresh tar.gz from /app/backend on each request to always ship latest server.py
@@ -1017,36 +1052,36 @@ async def download_server_source():
     with tarfile.open(out.name, "w:gz") as tar:
         for f in src_files:
             tar.add(f, arcname=f"backend/{_os.path.basename(f)}")
-    return FileResponse(out.name, media_type="application/gzip", filename="nuntamea-backend-v1.2.1.tar.gz")
+    return FileResponse(out.name, media_type="application/gzip", filename="nuntamea-backend-v1.2.5.tar.gz")
 
 
 @api.get("/assets/server-py")
 async def download_server_py_only():
-    """Download just the latest server.py (v1.2.1) — for quick replacement on Render."""
+    """Download just the latest server.py (v1.2.5) — for quick replacement on Render."""
     from fastapi.responses import FileResponse
     import os as _os
     p = "/app/backend/server.py"
     if not _os.path.exists(p):
         raise HTTPException(status_code=404, detail="server.py missing")
-    return FileResponse(p, media_type="text/x-python; charset=utf-8", filename="server.py")
+    return FileResponse(p, media_type="text/x-python; charset=utf-8", filename="server_v1.2.6.py")
 
 
 @api.get("/assets/frontend-source")
 async def download_frontend_source():
-    """Download full frontend source (without node_modules) as a tar.gz — v1.2.1."""
+    """Download full frontend source (without node_modules) as a tar.gz — v1.2.5."""
     from fastapi.responses import FileResponse
     import os as _os, tarfile, tempfile
-    # Prefer pre-built v1.2.1 tarball
-    pre = "/app/frontend_v1.2.1.tar.gz"
-    if _os.path.exists(pre):
-        return FileResponse(pre, media_type="application/gzip", filename="nuntamea-frontend-v1.2.1.tar.gz")
+    # Prefer pre-built v1.2.5 tarball
+    for pre in ["/app/frontend_v1.2.6.tar.gz", "/app/frontend_v1.2.5.tar.gz", "/app/frontend_v1.2.4.tar.gz", "/app/frontend_v1.2.1.tar.gz"]:
+        if _os.path.exists(pre):
+            return FileResponse(pre, media_type="application/gzip", filename=_os.path.basename(pre).replace("frontend_", "nuntamea-frontend-"))
     # Fallback: build on the fly from /app/frontend
     fr_dir = "/app/frontend"
     if not _os.path.isdir(fr_dir):
         raise HTTPException(status_code=404, detail="Frontend folder missing")
     out = tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False)
     out.close()
-    SKIP = {"node_modules", ".expo", "dist", ".git", ".metro-cache", ".cache", "web-build"}
+    SKIP = {"node_modules", ".expo", "dist", ".git", ".metro-cache", ".cache", "web-build", "ios", "android"}
     def _filter(tarinfo):
         for s in SKIP:
             if f"/{s}/" in ("/" + tarinfo.name + "/") or tarinfo.name.endswith(f"/{s}"):
@@ -1054,7 +1089,7 @@ async def download_frontend_source():
         return tarinfo
     with tarfile.open(out.name, "w:gz") as tar:
         tar.add(fr_dir, arcname="frontend", filter=_filter)
-    return FileResponse(out.name, media_type="application/gzip", filename="nuntamea-frontend-v1.2.1.tar.gz")
+    return FileResponse(out.name, media_type="application/gzip", filename="nuntamea-frontend-v1.2.5.tar.gz")
 
 
 @api.get("/assets/deploy-final")
@@ -1063,11 +1098,85 @@ async def download_deploy_doc():
     from fastapi.responses import FileResponse
     import os as _os
     # Prefer latest version
-    for p in ["/app/DEPLOY_FINAL_v1.2.0.md", "/app/DEPLOY_FINAL_v1.1.0.md"]:
+    for p in ["/app/DEPLOY_FINAL_v1.2.6.md", "/app/DEPLOY_FINAL_v1.2.5.md", "/app/DEPLOY_FINAL_v1.2.4.md", "/app/DEPLOY_FINAL_v1.2.0.md", "/app/DEPLOY_FINAL_v1.1.0.md"]:
         if _os.path.exists(p):
-            ver = "v1.2.0" if "v1.2.0" in p else "v1.1.0"
+            ver = _os.path.basename(p).replace("DEPLOY_FINAL_", "").replace(".md", "")
             return FileResponse(p, media_type="text/markdown; charset=utf-8", filename=f"DEPLOY_FINAL_{ver}.md")
     raise HTTPException(status_code=404, detail="Deploy doc missing")
+
+
+@api.get("/assets/frontend-file")
+async def download_frontend_file(path: str):
+    """Download any individual frontend file by relative path (e.g. ?path=app.json).
+    Sandboxed to /app/frontend only.
+    """
+    from fastapi.responses import FileResponse
+    import os as _os
+    base = _os.path.realpath("/app/frontend")
+    target = _os.path.realpath(_os.path.join(base, path))
+    if not target.startswith(base + _os.sep) and target != base:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not _os.path.exists(target) or not _os.path.isfile(target):
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    ext = _os.path.splitext(path)[1].lower()
+    mime_map = {
+        ".tsx": "text/plain; charset=utf-8", ".ts": "text/plain; charset=utf-8",
+        ".jsx": "text/plain; charset=utf-8", ".js": "text/plain; charset=utf-8",
+        ".json": "application/json; charset=utf-8",
+        ".md": "text/markdown; charset=utf-8",
+        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".svg": "image/svg+xml", ".webp": "image/webp",
+    }
+    return FileResponse(target, media_type=mime_map.get(ext, "application/octet-stream"),
+                        filename=_os.path.basename(target))
+
+
+@api.get("/assets/manifest-v126")
+async def manifest_v126():
+    """Return list of v1.2.6 changed frontend files for individual GitHub upload."""
+    files_v126 = [
+        # P0: Premium badge + Premium UX
+        "src/PremiumUpgradeModal.tsx",
+        # P0: Routing + language
+        "app/index.tsx",
+        "app/language-select.tsx",
+        "src/i18n/LanguageContext.tsx",
+        "src/i18n/index.ts",
+        # P0/P1: Legal screens fully i18n
+        "app/legal/index.tsx",
+        "app/legal/privacy.tsx",
+        "app/legal/terms.tsx",
+        # P1: Cookie banner i18n
+        "src/CookieBanner.tsx",
+        # P1: Vendors layout
+        "app/(tabs)/furnizori.tsx",
+        # P1: Currency placeholder + format
+        "app/(tabs)/dashboard.tsx",
+        "app/(tabs)/buget.tsx",
+        # P1: Invitation date locale
+        "app/invitation/overview.tsx",
+        # i18n JSON dictionaries (all 4 langs)
+        "src/i18n/ro.json",
+        "src/i18n/en.json",
+        "src/i18n/it.json",
+        "src/i18n/es.json",
+        # Version bump
+        "app.json",
+    ]
+    import os as _os
+    base = "/api/assets/frontend-file?path="
+    out = {"version": "1.2.6", "versionCode": 20, "buildNumber": "6", "totalFiles": len(files_v126), "files": []}
+    for f in files_v126:
+        p = _os.path.join("/app/frontend", f)
+        exists = _os.path.exists(p)
+        out["files"].append({
+            "path": f,
+            "exists": exists,
+            "size": _os.path.getsize(p) if exists else 0,
+            "url": f"{base}{f}",
+        })
+    return out
+
 
 
 @api.get("/assets/locale-ro")
