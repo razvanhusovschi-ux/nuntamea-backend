@@ -1064,7 +1064,7 @@ async def download_server_py_only():
     p = "/app/backend/server.py"
     if not _os.path.exists(p):
         raise HTTPException(status_code=404, detail="server.py missing")
-    return FileResponse(p, media_type="text/x-python; charset=utf-8", filename="server_v1.2.6.py")
+    return FileResponse(p, media_type="text/x-python; charset=utf-8", filename="server_v1.2.7.py")
 
 
 @api.get("/assets/frontend-source", include_in_schema=False)
@@ -1099,7 +1099,7 @@ async def download_deploy_doc():
     from fastapi.responses import FileResponse
     import os as _os
     # Prefer latest version
-    for p in ["/app/DEPLOY_FINAL_v1.2.6.md", "/app/DEPLOY_FINAL_v1.2.5.md", "/app/DEPLOY_FINAL_v1.2.4.md", "/app/DEPLOY_FINAL_v1.2.0.md", "/app/DEPLOY_FINAL_v1.1.0.md"]:
+    for p in ["/app/DEPLOY_FINAL_v1.2.7.md", "/app/DEPLOY_FINAL_v1.2.6.md", "/app/DEPLOY_FINAL_v1.2.5.md", "/app/DEPLOY_FINAL_v1.2.4.md", "/app/DEPLOY_FINAL_v1.2.0.md", "/app/DEPLOY_FINAL_v1.1.0.md"]:
         if _os.path.exists(p):
             ver = _os.path.basename(p).replace("DEPLOY_FINAL_", "").replace(".md", "")
             return FileResponse(p, media_type="text/markdown; charset=utf-8", filename=f"DEPLOY_FINAL_{ver}.md")
@@ -1130,6 +1130,54 @@ async def download_frontend_file(path: str):
     }
     return FileResponse(target, media_type=mime_map.get(ext, "application/octet-stream"),
                         filename=_os.path.basename(target))
+
+
+@api.get("/assets/frontend-zip-v126", include_in_schema=False)
+async def download_frontend_zip_v126():
+    """Download only the 18 v1.2.6 changed frontend files as a single ZIP — ready to extract into GitHub repo root."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/frontend_v1.2.6_changed.zip"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ZIP missing")
+    return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-v1.2.6-changed.zip")
+
+
+@api.get("/assets/frontend-zip-v127", include_in_schema=False)
+async def download_frontend_zip_v127():
+    """Download the 11 v1.2.7 changed frontend files (bug-fix sprint) as a single ZIP."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/frontend_v1.2.7_changed.zip"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ZIP missing")
+    return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-v1.2.7-changed.zip")
+
+
+@api.get("/assets/manifest-v127", include_in_schema=False)
+async def manifest_v127():
+    """Return list of v1.2.7 changed frontend files for individual GitHub upload."""
+    files_v127 = [
+        "src/pdfExport.ts",
+        "app/invitation/share.tsx",
+        "app/(tabs)/buget.tsx",
+        "app/(tabs)/furnizori.tsx",
+        "src/exporters.ts",
+        "app/invitation/save-the-date.tsx",
+        "src/i18n/ro.json",
+        "src/i18n/en.json",
+        "src/i18n/it.json",
+        "src/i18n/es.json",
+        "app.json",
+    ]
+    import os as _os
+    base = "/api/assets/frontend-file?path="
+    out = {"version": "1.2.7", "versionCode": 21, "buildNumber": "7", "totalFiles": len(files_v127), "zipUrl": "/api/assets/frontend-zip-v127", "files": []}
+    for f in files_v127:
+        p = _os.path.join("/app/frontend", f)
+        exists = _os.path.exists(p)
+        out["files"].append({"path": f, "exists": exists, "size": _os.path.getsize(p) if exists else 0, "url": f"{base}{f}"})
+    return out
 
 
 @api.get("/assets/manifest-v126", include_in_schema=False)
