@@ -128,6 +128,7 @@ class InvitatIn(BaseModel):
     meniu: Optional[str] = "standard"
     masa: Optional[str] = ""
     telefon: Optional[str] = ""
+    prefix_tara: Optional[str] = ""  # international country prefix without + (e.g. "40", "39", "34", "44", "1")
     observatii: Optional[str] = ""
 
 
@@ -142,7 +143,8 @@ class LocationIn(BaseModel):
 class InvitationSetupIn(BaseModel):
     mireasa: Optional[str] = ""
     mire: Optional[str] = ""
-    couple_photo: Optional[str] = ""  # base64 data url
+    couple_photo: Optional[str] = ""  # base64 data url — used by the invitation card
+    couple_photo_std: Optional[str] = ""  # separate photo used by Save the Date — independent from invitation
     nas: Optional[str] = ""
     nasa: Optional[str] = ""
     tata_mire: Optional[str] = ""
@@ -1152,6 +1154,85 @@ async def download_frontend_zip_v127():
     if not _os.path.exists(p):
         raise HTTPException(status_code=404, detail="ZIP missing")
     return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-v1.2.7-changed.zip")
+
+
+@api.get("/assets/frontend-full-v128", include_in_schema=False)
+async def download_frontend_full_v128():
+    """Download the COMPLETE frontend code (v1.2.8) as a single ZIP — flat layout, ready for fresh GitHub repo + EAS build."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/nuntamea_frontend_FULL_v1.2.8.zip"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ZIP missing")
+    return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-FULL-v1.2.8.zip")
+
+
+@api.get("/assets/frontend-zip-v129", include_in_schema=False)
+async def download_frontend_zip_v129():
+    """Download v1.2.9 CHANGED files (10 files, bug fixes)."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/frontend_v1.2.9_changed.zip"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ZIP missing")
+    return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-v1.2.9-changed.zip")
+
+
+@api.get("/assets/frontend-full-v129", include_in_schema=False)
+async def download_frontend_full_v129():
+    """Download COMPLETE frontend v1.2.9 — flat layout, ready for GitHub root + EAS build."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/nuntamea_frontend_FULL_v1.2.9.zip"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ZIP missing")
+    return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-FULL-v1.2.9.zip")
+
+
+
+@api.get("/assets/frontend-zip-v130", include_in_schema=False)
+async def download_frontend_zip_v130():
+    """Download v1.3.0 CHANGED files (5 files, final bug fixes before monetization)."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/frontend_v1.3.0_changed.zip"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ZIP missing")
+    return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-v1.3.0-changed.zip")
+
+
+@api.get("/assets/frontend-full-v130", include_in_schema=False)
+async def download_frontend_full_v130():
+    """Download COMPLETE frontend v1.3.0 — flat layout, ready for GitHub root + EAS build."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/nuntamea_frontend_FULL_v1.3.0.zip"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ZIP missing")
+    return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-FULL-v1.3.0.zip")
+
+
+
+@api.get("/assets/manifest-v129", include_in_schema=False)
+async def manifest_v129():
+    """Return list of v1.2.9 changed frontend files with individual URLs."""
+    files = [
+        "app/(tabs)/invitati.tsx", "app/(tabs)/buget.tsx", "app/(tabs)/dashboard.tsx",
+        "app/invitation/save-the-date.tsx",
+        "src/i18n/index.ts", "src/i18n/ro.json", "src/i18n/en.json", "src/i18n/it.json", "src/i18n/es.json",
+        "app.json",
+    ]
+    import os as _os
+    base = "/api/assets/frontend-file?path="
+    out = {"version": "1.2.9", "versionCode": 26, "buildNumber": "11", "totalFiles": len(files),
+           "fullZipUrl": "/api/assets/frontend-full-v129",
+           "changedZipUrl": "/api/assets/frontend-zip-v129",
+           "files": []}
+    for f in files:
+        p = _os.path.join("/app/frontend", f)
+        exists = _os.path.exists(p)
+        out["files"].append({"path": f, "exists": exists, "size": _os.path.getsize(p) if exists else 0, "url": f"{base}{f}"})
+    return out
 
 
 @api.get("/assets/manifest-v127", include_in_schema=False)
