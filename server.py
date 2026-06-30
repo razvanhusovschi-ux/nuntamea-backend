@@ -577,15 +577,13 @@ async def list_invitati(user=Depends(get_current_user)):
 
 @api.post("/invitati")
 async def add_invitat(body: InvitatIn, user=Depends(get_current_user)):
+    # Spread model_dump so any new field added to InvitatIn (e.g. prefix_tara) auto-persists
     doc = {
+        **body.model_dump(),
         "id": str(uuid.uuid4()),
         "user_id": user["uid"],
-        "nume": body.nume,
         "confirmat": body.confirmat or "in_asteptare",
         "meniu": body.meniu or "standard",
-        "masa": body.masa or "",
-        "telefon": body.telefon or "",
-        "observatii": body.observatii or "",
         "created_at": now_iso(),
     }
     await db.invitati.insert_one(doc.copy())
@@ -648,7 +646,7 @@ async def edit_timeline(item_id: str, body: TimelineIn, user=Depends(get_current
 
 
 # ---------- Health ----------
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.3.1"
 
 @api.get("/")
 async def root():
@@ -1210,6 +1208,30 @@ async def download_frontend_full_v130():
     if not _os.path.exists(p):
         raise HTTPException(status_code=404, detail="ZIP missing")
     return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-FULL-v1.3.0.zip")
+
+
+
+@api.get("/assets/frontend-zip-v131", include_in_schema=False)
+async def download_frontend_zip_v131():
+    """Download v1.3.1 CHANGED files (SDK 54 legacy FileSystem fix for CSV export)."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/frontend_v1.3.1_changed.zip"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ZIP missing")
+    return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-v1.3.1-changed.zip")
+
+
+@api.get("/assets/frontend-full-v131", include_in_schema=False)
+async def download_frontend_full_v131():
+    """Download COMPLETE frontend v1.3.1 — FINAL release candidate for Google Play."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/nuntamea_frontend_FULL_v1.3.1.zip"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ZIP missing")
+    return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-FULL-v1.3.1.zip")
+
 
 
 
