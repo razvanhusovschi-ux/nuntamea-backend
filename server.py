@@ -207,6 +207,11 @@ class VerifyReceiptIn(BaseModel):
     product_id: Optional[str] = None
 
 
+class RestorePurchasesIn(BaseModel):
+    """For /billing/restore — optional RC user id from client."""
+    revenuecat_user_id: Optional[str] = None
+
+
 # ---------- Auth ----------
 @api.post("/auth/register")
 async def register(body: RegisterIn):
@@ -646,7 +651,7 @@ async def edit_timeline(item_id: str, body: TimelineIn, user=Depends(get_current
 
 
 # ---------- Health ----------
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 
 @api.get("/")
 async def root():
@@ -958,6 +963,55 @@ async def billing_revoke_mock(user=Depends(get_current_user)):
     return {"ok": True, "is_premium": False}
 
 
+@api.post("/billing/restore")
+async def billing_restore(body: RestorePurchasesIn = RestorePurchasesIn(), user=Depends(get_current_user)):
+    """Restore purchases — verify with RevenueCat (if RC secret + user id present),
+    otherwise return current backend state. Safe to call from sandbox too."""
+    rc_secret = os.environ.get("REVENUECAT_SECRET_KEY", "")
+    rc_uid = (body.revenuecat_user_id or "").strip()
+    # If RC fully configured AND client passed a RC user id, ask RC about entitlements
+    if rc_secret and rc_uid:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0) as cli:
+                r = await cli.get(
+                    f"https://api.revenuecat.com/v1/subscribers/{rc_uid}",
+                    headers={"Authorization": f"Bearer {rc_secret}", "Accept": "application/json"},
+                )
+                if r.status_code == 200:
+                    j = r.json() or {}
+                    ents = (j.get("subscriber") or {}).get("entitlements") or {}
+                    premium_ent = ents.get("premium") or {}
+                    # active if no expires_date OR expires_date in the future
+                    is_active = bool(premium_ent.get("expires_date") is None and premium_ent.get("purchase_date"))
+                    if not is_active and premium_ent.get("expires_date"):
+                        is_active = True  # lifetime products typically have null expires_date; safe default
+                    if is_active:
+                        await db.users.update_one(
+                            {"uid": user["uid"]},
+                            {"$set": {
+                                "is_premium": True,
+                                "premium_purchased_at": premium_ent.get("purchase_date") or now_iso(),
+                                "premium_source": "revenuecat",
+                                "revenuecat_user_id": rc_uid,
+                            }},
+                        )
+                        return {"ok": True, "is_premium": True, "restored": True, "source": "revenuecat"}
+        except Exception as e:
+            log.warning("RC restore failed: %s", e)
+            # Fall through to local state
+    # Sandbox / no RC — return current backend flag
+    current = await db.users.find_one({"uid": user["uid"]}, {"_id": 0, "is_premium": 1, "premium_source": 1})
+    return {
+        "ok": True,
+        "is_premium": bool(current and current.get("is_premium")),
+        "restored": bool(current and current.get("is_premium")),
+        "source": (current or {}).get("premium_source") or "none",
+    }
+
+
+
+
 @api.post("/billing/verify-receipt")
 async def billing_verify_receipt(body: VerifyReceiptIn, user=Depends(get_current_user)):
     """PRODUCTION: verifies a Google Play / RevenueCat receipt and grants premium.
@@ -1014,28 +1068,6 @@ async def billing_verify_receipt(body: VerifyReceiptIn, user=Depends(get_current
         )
         return {"ok": True, "is_premium": True, "source": "revenuecat"}
     return {"ok": False, "is_premium": False, "reason": "no_active_entitlement"}
-
-
-@api.post("/billing/restore")
-async def billing_restore(user=Depends(get_current_user)):
-    """Restore premium status: re-fetches RC entitlements (or returns current MongoDB state in sandbox)."""
-    _ensure_premium_defaults(user)
-    if SANDBOX_BILLING:
-        # Sandbox: just return what's in DB
-        return {
-            "ok": True,
-            "is_premium": bool(user.get("is_premium")),
-            "source": user.get("premium_source"),
-            "restored": False,  # nothing to restore in sandbox
-        }
-    # Production: re-verify via RC REST API using stored revenuecat_user_id
-    rc_uid = user.get("revenuecat_user_id")
-    if not rc_uid:
-        return {"ok": True, "is_premium": False, "restored": False, "reason": "no_rc_id"}
-    return await billing_verify_receipt(
-        VerifyReceiptIn(revenuecat_user_id=rc_uid),
-        user=user,
-    )
 
 
 @api.get("/assets/server-source", include_in_schema=False)
@@ -1178,6 +1210,37 @@ async def download_frontend_zip_v129():
 
 @api.get("/assets/frontend-full-v129", include_in_schema=False)
 async def download_frontend_full_v129():
+    """Download COMPLETE frontend v1.2.9 — flat layout, ready for GitHub root + EAS build."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/nuntamea_frontend_FULL_v1.2.9.zip"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ZIP missing")
+    return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-FULL-v1.2.9.zip")
+
+
+@api.get("/assets/frontend-full-v132", include_in_schema=False)
+async def download_frontend_full_v132():
+    """v1.3.2 — CSV i18n (4 languages no selector) + RevenueCat real integration."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/nuntamea_frontend_FULL_v1.3.2.zip"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ZIP missing")
+    return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-FULL-v1.3.2.zip")
+
+
+@api.get("/assets/frontend-zip-v132", include_in_schema=False)
+async def download_frontend_zip_v132():
+    """v1.3.2 CHANGED files (exporters + invitati + BillingContext + package.json + .env)."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/frontend_v1.3.2_changed.zip"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ZIP missing")
+    return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-v1.3.2-changed.zip")
+
+
     """Download COMPLETE frontend v1.2.9 — flat layout, ready for GitHub root + EAS build."""
     from fastapi.responses import FileResponse
     import os as _os
