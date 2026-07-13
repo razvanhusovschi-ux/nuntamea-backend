@@ -474,18 +474,24 @@ async def upd_cheltuiala(item_id: str, body: CheltuialaIn, user=Depends(get_curr
 
 # ---------- Furnizori ----------
 async def _sync_furnizor_to_buget(furnizor: dict):
-    """Auto-create/update a linked cheltuiala when furnizor has avans > 0.
-    Idempotent: id = 'furn_<furnizor_id>'."""
+    """Auto-create/update a linked cheltuiala for a furnizor.
+    Logic (v1.3.4):
+      - If avans > 0 → cheltuiala with sum=avans (partial payment)
+      - Else if pret > 0 → cheltuiala with sum=pret (paid in full — no avans means integral)
+      - Else nothing to track → delete any existing linked cheltuiala.
+    Idempotent: id = 'furn_<furnizor_id>'. Title is the vendor NAME only (no 'Avans' prefix)."""
     cheltuiala_id = f"furn_{furnizor['id']}"
     avans = float(furnizor.get("avans") or 0)
-    if avans > 0:
+    pret = float(furnizor.get("pret") or 0)
+    suma = avans if avans > 0 else pret
+    if suma > 0:
         await db.cheltuieli.update_one(
             {"id": cheltuiala_id},
             {"$set": {
                 "id": cheltuiala_id,
                 "user_id": furnizor["user_id"],
-                "titlu": f"Avans {furnizor.get('tip','')}: {furnizor.get('nume','')}".strip(),
-                "suma": avans,
+                "titlu": (furnizor.get("nume") or furnizor.get("tip") or "").strip(),
+                "suma": suma,
                 "categoria": furnizor.get("tip", "Altele"),
                 "data": now_iso(),
                 "linked_furnizor": furnizor["id"],
@@ -651,7 +657,7 @@ async def edit_timeline(item_id: str, body: TimelineIn, user=Depends(get_current
 
 
 # ---------- Health ----------
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.4"
 
 @api.get("/")
 async def root():
@@ -1228,6 +1234,28 @@ async def download_frontend_full_v132():
     if not _os.path.exists(p):
         raise HTTPException(status_code=404, detail="ZIP missing")
     return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-FULL-v1.3.2.zip")
+
+
+@api.get("/assets/frontend-full-v133", include_in_schema=False)
+async def download_frontend_full_v133():
+    """v1.3.3 — RevenueCat PRODUCTION Android key swap + version bump."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/nuntamea_frontend_FULL_v1.3.3.zip"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ZIP missing")
+    return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-FULL-v1.3.3.zip")
+
+
+@api.get("/assets/frontend-full-v134", include_in_schema=False)
+async def download_frontend_full_v134():
+    """v1.3.4 — vendor sync full-paid + prefix editable + rating prompt (4 langs)."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    p = "/app/nuntamea_frontend_FULL_v1.3.4.zip"
+    if not _os.path.exists(p):
+        raise HTTPException(status_code=404, detail="ZIP missing")
+    return FileResponse(p, media_type="application/zip", filename="nuntamea-frontend-FULL-v1.3.4.zip")
 
 
 @api.get("/assets/frontend-zip-v132", include_in_schema=False)
